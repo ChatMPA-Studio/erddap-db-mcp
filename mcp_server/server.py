@@ -16,6 +16,7 @@ from tools.data_access import (
     get_dataset_info,
 )
 from mcp_server.prompts import load_skills
+from scheduler.sync_scheduler import start_scheduler
 
 app = Server("erddap-db-mcp")
 
@@ -164,19 +165,23 @@ async def get_prompt(name: str, arguments: dict | None) -> types.GetPromptResult
 
 
 async def main():
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="erddap-db-mcp",
-                server_version="0.1.0",
-                capabilities=app.get_capabilities(
-                    notification_options=None,
-                    experimental_capabilities={},
+    scheduler = start_scheduler()
+    try:
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await app.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="erddap-db-mcp",
+                    server_version="0.1.0",
+                    capabilities=app.get_capabilities(
+                        notification_options=None,
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+    finally:
+        scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":

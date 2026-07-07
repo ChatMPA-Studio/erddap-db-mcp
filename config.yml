@@ -5,10 +5,8 @@ datasets:
   chlorophyll:
     default: "erdMH1chla8day_R2022NRT"
     on_demand:
-      viirs_4km: "nesdisVHNSQchlaDaily"
-      viirs_noaa20_4km: "nesdisVHNnoaa20chlaDaily"
-      viirs_s3_2km: "noaacwNPPN20S3ASCIDINEOF2kmDaily"
-      viirs_750m_npac: "erdVHNchla1day"
+      viirs_750m_npac: "erdVHNchla1day"      # 750m, solo Pacífico Norte (lon <= -110)
+      viirs_750m_8day: "erdVHNchla8day"      # 750m, 8-day, solo Pacífico Norte
   sst:
     default: "ncdcOisst21Agg_LonPM180"
     on_demand:

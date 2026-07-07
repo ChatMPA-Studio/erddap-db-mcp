@@ -1,0 +1,29 @@
+erddap:
+  server: "https://coastwatch.pfeg.noaa.gov/erddap"
+
+datasets:
+  chlorophyll:
+    default: "erdMH1chla8day_R2022NRT"
+    on_demand:
+      viirs_4km: "nesdisVHNSQchlaDaily"
+      viirs_noaa20_4km: "nesdisVHNnoaa20chlaDaily"
+      viirs_s3_2km: "noaacwNPPN20S3ASCIDINEOF2kmDaily"
+      viirs_750m_npac: "erdVHNchla1day"
+  sst:
+    default: "ncdcOisst21Agg_LonPM180"
+    on_demand:
+      mur_1km: "jplMURSST41"
+      mur_anomaly: "jplMURSST41anom1day"
+
+regions:
+  pacific_mexico:
+    bbox: [-118, -84, 14, 32]   # [lon_min, lon_max, lat_min, lat_max]
+  gulf_mexico:
+    bbox: [-98, -81, 18, 31]
+
+sync:
+  interval_days: 14
+  cache_ttl_days: 7
+  default_regions:
+    - pacific_mexico
+    - gulf_mexico

@@ -1,0 +1,11 @@
+services:
+  erddap-mcp:
+    build: .
+    volumes:
+      - erddap_data:/app/data
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+
+volumes:
+  erddap_data:

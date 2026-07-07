@@ -140,7 +140,7 @@ def _bbox_to_region_key(bbox: list) -> str:
 def _ds_to_json(ds, variable: str, source: str, sst_var: str = "sst") -> str:
     import numpy as np
     data_var = next(iter(ds.data_vars)) if variable == "chlorophyll" else sst_var
-    arr = ds[data_var].values
+    arr = ds[data_var].squeeze().values
     return json.dumps({
         "data": {
             "values": np.where(np.isnan(arr), None, arr).tolist(),

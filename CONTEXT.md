@@ -9,7 +9,8 @@ MCP server para extraer y analizar datos de clorofila-a y temperatura superficia
 desde NOAA CoastWatch ERDDAP. Módulo enchufable de ChatMPA. Python, sigue el TEMPLATE.md del ecosistema.
 
 Repo: `C:\Users\carol\OneDrive\Documentos\CBMC\Projects\erddap-db-mcp`
-GitHub: `https://github.com/ccalderong/erddap-db-mcp` (pendiente crear)
+GitHub: `https://github.com/ChatMPA-Studio/erddap-db-mcp`
+Project: `https://github.com/orgs/ChatMPA-Studio/projects/3`
 
 ## Datasets confirmados
 

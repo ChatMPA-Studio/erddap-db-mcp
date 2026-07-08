@@ -17,6 +17,7 @@ from mcp_server.data_store import (
     load_local,
     register_cache,
 )
+from mcp_server.security import validate_get_data_args
 from tools.chlorophyll import fetch_chlorophyll
 from tools.sst import fetch_sst
 
@@ -38,6 +39,7 @@ def _resolve_bbox(bbox) -> list[float]:
 
 
 async def get_data(args: dict) -> str:
+    validate_get_data_args(args)
     variable = args["variable"]
     bbox = _resolve_bbox(args["bbox"])
     date_range = args["date_range"]

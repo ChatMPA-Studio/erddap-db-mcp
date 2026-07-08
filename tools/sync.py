@@ -2,13 +2,16 @@
 Sync logic: downloads default datasets for configured regions.
 Downloads year by year for resumability — if interrupted, the next run
 picks up from the last successfully downloaded year.
+Includes server availability check and exponential backoff retries.
 Called by the scheduler and by the update_data tool.
 """
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import yaml
 
 from mcp_server.data_store import (
@@ -20,6 +23,9 @@ from tools.chlorophyll import fetch_chlorophyll
 from tools.sst import fetch_sst
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+RETRY_BACKOFF = [30, 120, 300]  # seconds between retries: 30s, 2min, 5min
 
 CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
 
@@ -41,6 +47,12 @@ async def run_sync(variable: str = "all", region: str = "all") -> dict:
         variable: 'chlorophyll', 'sst', or 'all'
         region: region name from config or 'all'
     """
+    server = CONFIG["erddap"]["server"]
+    if not await _server_available(server):
+        msg = f"ERDDAP server unavailable ({server}). Sync aborted — will retry on next scheduled run."
+        logger.warning(msg)
+        return {"results": [{"status": "server_unavailable", "server": server}], "synced_at": datetime.utcnow().isoformat()}
+
     variables = ["chlorophyll", "sst"] if variable == "all" else [variable]
     regions = list(CONFIG["regions"].keys()) if region == "all" else [region]
 
@@ -82,45 +94,11 @@ async def _sync_by_year(
             break
 
         logger.info("Downloading %s | %s | %d...", variable, region, year)
-        try:
-            if variable == "chlorophyll":
-                ds = await fetch_chlorophyll(
-                    dataset_id, bbox,
-                    year_start.isoformat(),
-                    year_end.isoformat(),
-                )
-            else:
-                ds = await fetch_sst(
-                    dataset_id, bbox,
-                    year_start.isoformat(),
-                    year_end.isoformat(),
-                )
-
-            save_to_store(ds, variable, region)
-            zarr_path = str(Path(__file__).parent.parent / "data" / variable / region)
-            register_download(
-                variable, dataset_id, region,
-                year_start.isoformat(), year_end.isoformat(),
-                zarr_path,
-            )
-            results.append({
-                "variable": variable,
-                "region": region,
-                "year": year,
-                "status": "downloaded",
-            })
-            logger.info("OK %s | %s | %d", variable, region, year)
-
-        except Exception as exc:
-            logger.error("FAILED %s | %s | %d: %s", variable, region, year, exc)
-            results.append({
-                "variable": variable,
-                "region": region,
-                "year": year,
-                "status": "error",
-                "error": str(exc),
-            })
-            # Continue to next year rather than aborting
+        result = await _fetch_with_retry(
+            variable, dataset_id, region, bbox,
+            year_start.isoformat(), year_end.isoformat(), year,
+        )
+        results.append(result)
 
     if not results:
         results.append({"variable": variable, "region": region, "status": "up_to_date"})
@@ -152,3 +130,56 @@ def _is_full_year_covered(record: dict, year: int) -> bool:
     start = datetime.fromisoformat(record["date_start"]).date()
     end = datetime.fromisoformat(record["date_end"]).date()
     return start <= date(year, 1, 1) and end >= date(year, 12, 31)
+
+
+async def _server_available(server: str) -> bool:
+    """Quick check that the ERDDAP server responds before starting sync."""
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{server}/index.html", timeout=10)
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _fetch_with_retry(
+    variable: str,
+    dataset_id: str,
+    region: str,
+    bbox: list,
+    date_start: str,
+    date_end: str,
+    year: int,
+) -> dict:
+    """Fetch one year of data with exponential backoff retries."""
+    zarr_path = str(Path(__file__).parent.parent / "data" / variable / region)
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            if variable == "chlorophyll":
+                ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
+            else:
+                ds = await fetch_sst(dataset_id, bbox, date_start, date_end)
+
+            save_to_store(ds, variable, region)
+            register_download(variable, dataset_id, region, date_start, date_end, zarr_path)
+            logger.info("OK %s | %s | %d", variable, region, year)
+            return {"variable": variable, "region": region, "year": year, "status": "downloaded"}
+
+        except Exception as exc:
+            if attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF[attempt]
+                logger.warning(
+                    "Attempt %d/%d failed for %s | %s | %d — retrying in %ds. Error: %s",
+                    attempt + 1, MAX_RETRIES, variable, region, year, wait, exc,
+                )
+                await asyncio.sleep(wait)
+            else:
+                logger.error("FAILED %s | %s | %d after %d attempts: %s", variable, region, year, MAX_RETRIES, exc)
+                return {
+                    "variable": variable,
+                    "region": region,
+                    "year": year,
+                    "status": "error",
+                    "error": str(exc),
+                }

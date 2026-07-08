@@ -1,0 +1,38 @@
+{
+  "skill": "erddap-data-status",
+  "version": "0.1.0",
+  "inputs": {
+    "variable": {
+      "type": "string",
+      "enum": ["chlorophyll", "sst"],
+      "description": "Optional — filter coverage report by variable"
+    },
+    "region": {
+      "type": "string",
+      "enum": ["pacific_mexico", "gulf_mexico", "all"],
+      "default": "all",
+      "description": "Optional — filter update by region (used with update_data)"
+    }
+  },
+  "required": [],
+  "outputs": {
+    "type": "object",
+    "description": "Coverage report or sync result",
+    "properties": {
+      "list_coverage": {
+        "data": "array of download records (variable, region, date_start, date_end, downloaded_at)",
+        "meta": { "count": "number of records" }
+      },
+      "update_data": {
+        "results": "array of sync results per variable+region+year",
+        "synced_at": "ISO timestamp of sync completion"
+      }
+    }
+  },
+  "notes": [
+    "Sync interval: every 14 days (automatic via scheduler)",
+    "Default regions: pacific_mexico, gulf_mexico",
+    "Historical coverage: chlorophyll from 2003, SST from 1981",
+    "Downloads are chunked by year — safe to interrupt and resume"
+  ]
+}

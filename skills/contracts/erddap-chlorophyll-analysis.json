@@ -1,0 +1,63 @@
+{
+  "skill": "erddap-chlorophyll-analysis",
+  "version": "0.1.0",
+  "inputs": {
+    "variable": {
+      "type": "string",
+      "enum": ["chlorophyll"],
+      "description": "Fixed value for this skill"
+    },
+    "bbox": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["pacific_mexico", "gulf_mexico"],
+          "description": "Predefined region shorthand"
+        },
+        {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 4,
+          "maxItems": 4,
+          "description": "[lon_min, lon_max, lat_min, lat_max]"
+        }
+      ]
+    },
+    "date_range": {
+      "type": "array",
+      "items": { "type": "string", "format": "date" },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "['YYYY-MM-DD', 'YYYY-MM-DD']. Max span: 5 years."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["auto", "viirs_750m_npac", "viirs_750m_8day"],
+      "default": "auto",
+      "description": "'auto' uses MODIS 4km default. High-res options only cover Pacific Norte (lon <= -110)."
+    }
+  },
+  "required": ["variable", "bbox", "date_range"],
+  "outputs": {
+    "type": "object",
+    "properties": {
+      "data": {
+        "values": "array[time][lat][lon] — chlorophyll-a in mg/m³, null where cloud cover",
+        "times": "array of 'YYYY-MM-DD' strings",
+        "lat": "array of latitude values",
+        "lon": "array of longitude values"
+      },
+      "meta": {
+        "variable": "chlorophyll",
+        "source": "'local' | 'cache' | 'erddap'",
+        "shape": "[n_times, n_lat, n_lon]"
+      }
+    }
+  },
+  "notes": [
+    "Default dataset: erdMH1chla8day_R2022NRT (MODIS Aqua, 4km, 8-day, 2003-present)",
+    "Typical range for Mexican seas: 0.05-10 mg/m³",
+    "NaN values indicate cloud cover — expected in daily/8-day composites",
+    "High-res source viirs_750m_npac limited to Pacifico Norte (lon <= -110)"
+  ]
+}

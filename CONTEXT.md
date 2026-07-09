@@ -46,6 +46,7 @@ Servidor: `https://coastwatch.pfeg.noaa.gov/erddap`
 | Zarr para almacenamiento local | Eficiente para queries espaciotemporales parciales |
 | `append_dim="time"` en `save_to_store` | `mode="w"` causa WinError 5 en Windows al sobreescribir chunks |
 | `data/` fuera de OneDrive | OneDrive pone DENY en chunks Zarr causando WinError 5 |
+| `DATA_DIR` vía env var `ERDDAP_DATA_DIR` | Path hardcodeado no funciona en Docker; default local para desarrollo, `/data/zarr` en droplet `chatmpa-mcps` |
 | `erddapy` no sobreescribir `e.variables` | Sobreescribir después de `griddap_initialize()` rompe la query |
 | `run_stdio.py` como entry point | Sigue el patrón de otros MCPs en Claude Desktop |
 

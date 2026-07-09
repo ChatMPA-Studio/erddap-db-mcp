@@ -124,7 +124,7 @@ async def get_dataset_info(args: dict) -> str:
 # --- helpers ---
 
 def _resolve_dataset_id(variable: str, source: str) -> str:
-    if source == "auto":
+    if source in ("auto", "erddap"):
         return CONFIG["datasets"][variable]["default"]
     on_demand = CONFIG["datasets"][variable].get("on_demand", {})
     if source not in on_demand:
@@ -139,10 +139,28 @@ def _bbox_to_region_key(bbox: list) -> str:
     return f"custom_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}"
 
 
+MAX_POINTS = 500_000  # ~2MB JSON; beyond this, instruct the model to narrow the query
+
+
 def _ds_to_json(ds, variable: str, source: str, sst_var: str = "sst") -> str:
     import numpy as np
     data_var = next(iter(ds.data_vars)) if variable == "chlorophyll" else sst_var
     arr = ds[data_var].squeeze().values
+    n_points = arr.size
+    shape = list(arr.shape)
+
+    if n_points > MAX_POINTS:
+        shape = list(arr.shape)
+        return json.dumps({
+            "error": "response_too_large",
+            "message": (
+                f"Query returned {n_points:,} data points {shape}, which exceeds the "
+                f"{MAX_POINTS:,}-point limit. Narrow the request by reducing the bbox, "
+                f"shortening the date range, or querying one timestep at a time."
+            ),
+            "meta": {"variable": variable, "source": source, "shape": shape},
+        })
+
     return json.dumps({
         "data": {
             "values": np.where(np.isnan(arr), None, arr).tolist(),
@@ -153,6 +171,6 @@ def _ds_to_json(ds, variable: str, source: str, sst_var: str = "sst") -> str:
         "meta": {
             "variable": variable,
             "source": source,
-            "shape": list(arr.shape),
+            "shape": shape,
         },
     })

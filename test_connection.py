@@ -14,9 +14,9 @@ DATE_END = "2024-01-31"
 
 
 def test_chlorophyll():
-    print("\n--- Probando clorofila (erdMH1chla8day_R2022NRT) ---")
+    print("\n--- Probando clorofila (erdMH1chla8day_R202SQ) ---")
     e = ERDDAP(server=SERVER, protocol="griddap")
-    e.dataset_id = "erdMH1chla8day_R2022NRT"
+    e.dataset_id = "erdMH1chla8day_R202SQ"
     e.griddap_initialize()
 
     e.constraints["time>="] = DATE_START

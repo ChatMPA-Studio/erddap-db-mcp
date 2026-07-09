@@ -59,9 +59,11 @@ async def run_sync(variable: str = "all", region: str = "all") -> dict:
     results = []
     for var in variables:
         dataset_id = CONFIG["datasets"][var]["default"]
+        dataset_max = await _get_dataset_max_date(server, dataset_id)
+        logger.info("Dataset %s max available date: %s", dataset_id, dataset_max)
         for reg in regions:
             bbox = CONFIG["regions"][reg]["bbox"]
-            year_results = await _sync_by_year(var, dataset_id, reg, bbox)
+            year_results = await _sync_by_year(var, dataset_id, reg, bbox, dataset_max)
             results.extend(year_results)
 
     return {"results": results, "synced_at": datetime.utcnow().isoformat()}
@@ -72,25 +74,25 @@ async def _sync_by_year(
     dataset_id: str,
     region: str,
     bbox: list,
+    dataset_max: date,
 ) -> list[dict]:
     """Download missing years one at a time. Skips years already in the store."""
-    today = date.today()
     results = []
 
-    downloaded_years = _get_downloaded_years(variable, region)
+    downloaded_years = _get_downloaded_years(variable, region, dataset_max)
     start_year = HISTORY_START[variable].year
-    current_year = today.year
+    end_year = dataset_max.year
 
-    for year in range(start_year, current_year + 1):
+    for year in range(start_year, end_year + 1):
         if year in downloaded_years:
             logger.debug("Skipping %s %s %d — already downloaded.", variable, region, year)
             continue
 
-        # Clip to actual availability start and today
+        # Clip to actual availability window
         year_start = max(date(year, 1, 1), HISTORY_START[variable])
-        year_end = min(date(year, 12, 31), today)
+        year_end = min(date(year, 12, 31), dataset_max)
 
-        if year_start > today:
+        if year_start > dataset_max:
             break
 
         logger.info("Downloading %s | %s | %d...", variable, region, year)
@@ -106,8 +108,13 @@ async def _sync_by_year(
     return results
 
 
-def _get_downloaded_years(variable: str, region: str) -> set[int]:
-    """Return the set of years already in the local store for this variable+region."""
+def _get_downloaded_years(variable: str, region: str, dataset_max: date) -> set[int]:
+    """Return the set of years already in the local store for this variable+region.
+
+    A year is considered complete if its DB record covers the full available range:
+    - Start: max(Jan 1, HISTORY_START) — accounts for datasets that don't start Jan 1
+    - End:   min(Dec 31, dataset_max)  — accounts for datasets not yet fully processed
+    """
     records = [
         r for r in get_local_coverage(variable)
         if r["region"] == region
@@ -116,20 +123,40 @@ def _get_downloaded_years(variable: str, region: str) -> set[int]:
     for r in records:
         start_year = datetime.fromisoformat(r["date_start"]).year
         end_year = datetime.fromisoformat(r["date_end"]).year
-        # Mark a year as complete only if the record covers the full year
-        # (or it's the current year, which is always partial)
-        today_year = date.today().year
         for y in range(start_year, end_year + 1):
-            if y == today_year or _is_full_year_covered(r, y):
+            year_start = max(date(y, 1, 1), HISTORY_START[variable])
+            year_end = min(date(y, 12, 31), dataset_max)
+            if _is_full_year_covered(r, year_start, year_end):
                 years.add(y)
     return years
 
 
-def _is_full_year_covered(record: dict, year: int) -> bool:
-    """Check if a download record covers a full calendar year."""
+def _is_full_year_covered(record: dict, year_start: date, year_end: date) -> bool:
+    """Check if a record covers the full available range for a year."""
     start = datetime.fromisoformat(record["date_start"]).date()
     end = datetime.fromisoformat(record["date_end"]).date()
-    return start <= date(year, 1, 1) and end >= date(year, 12, 31)
+    return start <= year_start and end >= year_end
+
+
+async def _get_dataset_max_date(server: str, dataset_id: str) -> date:
+    """Query ERDDAP metadata to get the actual last available date for a dataset."""
+    url = f"{server}/info/{dataset_id}/index.json"
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url, timeout=15)
+            r.raise_for_status()
+            rows = r.json().get("table", {}).get("rows", [])
+            cols = r.json().get("table", {}).get("columnNames", [])
+        for row in rows:
+            info = dict(zip(cols, row))
+            if info.get("Variable Name") == "time" and info.get("Attribute Name") == "actual_range":
+                # actual_range value is like "1.0674144E9, 1.7622432E9" (epoch seconds)
+                parts = info["Value"].split(",")
+                max_epoch = float(parts[-1].strip())
+                return date.fromtimestamp(max_epoch)
+    except Exception as e:
+        logger.warning("Could not fetch dataset max date for %s: %s — using today.", dataset_id, e)
+    return date.today()
 
 
 async def _server_available(server: str) -> bool:
@@ -152,7 +179,8 @@ async def _fetch_with_retry(
     year: int,
 ) -> dict:
     """Fetch one year of data with exponential backoff retries."""
-    zarr_path = str(Path(__file__).parent.parent / "data" / variable / region)
+    from mcp_server.data_store import DATA_DIR
+    zarr_path = str(DATA_DIR / variable / region)
 
     for attempt in range(MAX_RETRIES):
         try:

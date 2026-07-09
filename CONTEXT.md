@@ -16,10 +16,8 @@ Project: `https://github.com/orgs/ChatMPA-Studio/projects/3`
 
 | Variable | Capa | Dataset ID | Resolución | Cobertura |
 |----------|------|-----------|------------|-----------|
-| Clorofila | Default (local) | `erdMH1chla8day_R2022NRT` | 4 km, 8-day | 2003–presente |
+| Clorofila | Default (local) | `erdMH1chla8day_R202SQ` | 4 km, 8-day | 2003–presente |
 | SST | Default (local) | `ncdcOisst21Agg_LonPM180` | 0.25°, diario | 1981–presente |
-| Clorofila | On-demand | `nesdisVHNSQchlaDaily` | 4 km, diario | 2012–presente |
-| Clorofila | On-demand | `noaacwNPPN20S3ASCIDINEOF2kmDaily` | 2.32 km, diario | 2018–presente |
 | Clorofila | On-demand | `erdVHNchla1day` | 750 m, diario | 2015–presente (solo Pacífico Norte) |
 | SST | On-demand | `jplMURSST41` | 0.01°, diario | 2002–presente |
 | SST | On-demand | `jplMURSST41anom1day` | 0.01°, diario | 2002–presente |
@@ -34,39 +32,44 @@ Servidor: `https://coastwatch.pfeg.noaa.gov/erddap`
 - **3 skills:** `erddap-chlorophyll-analysis`, `erddap-sst-analysis`, `erddap-data-status`
 - **Regiones predefinidas:** `pacific_mexico [-118,-84,14,32]`, `gulf_mexico [-98,-81,18,31]`
 - **`get_data` tiene parámetro `sst_var`:** `sst` (default), `anom`, `err`, `ice`
+- **Datos locales en:** `C:/Users/carol/erddap-data/data/` (fuera de OneDrive para evitar conflictos de permisos)
 
 ## Decisiones tomadas
 
 | Decisión | Razón |
 |----------|-------|
 | Python (no R) | Consistencia con ChatMPA, MCP SDK más maduro |
-| MODIS 8-day como default clorofila | Balance nubosidad/resolución temporal; histórico más largo |
+| MODIS Science Quality (`_R202SQ`) en lugar de NRT | Datos más precisos para análisis |
 | OISST LonPM180 como default SST | Longitudes -180/180 compatibles con bboxes de México |
 | No Copernicus ERDDAP | Conexión rechazada en pruebas |
 | `sst_var` en `get_data` | OISST incluye anom/err/ice que son útiles |
 | Zarr para almacenamiento local | Eficiente para queries espaciotemporales parciales |
+| `append_dim="time"` en `save_to_store` | `mode="w"` causa WinError 5 en Windows al sobreescribir chunks |
+| `data/` fuera de OneDrive | OneDrive pone DENY en chunks Zarr causando WinError 5 |
+| `erddapy` no sobreescribir `e.variables` | Sobreescribir después de `griddap_initialize()` rompe la query |
+| `run_stdio.py` como entry point | Sigue el patrón de otros MCPs en Claude Desktop |
 
-## Estado actual
+## Estado actual (2026-07-08)
 
-**Probado y funcionando:**
-- Conexión ERDDAP para clorofila (`erdMH1chla8day_R2022NRT`) ✓
-- Conexión ERDDAP para SST (`ncdcOisst21Agg_LonPM180`) con `sst_var` ✓
-- Dependencias instaladas en `.venv` ✓
+**Sync completo:**
+| Variable | Región | Cobertura |
+|---|---|---|
+| Clorofila | pacific_mexico | 2003–2025 (23 años) |
+| Clorofila | gulf_mexico | 2003–2025 (23 años) |
+| SST | pacific_mexico | 1981–2026 (46 años) |
+| SST | gulf_mexico | 1981–2026 (46 años) |
 
-**Escrito pero sin probar end-to-end:**
-- `tools/data_access.py` — flujo cache-first completo
-- `tools/sync.py` — lógica de sincronización
-- `mcp_server/server.py` — servidor MCP con 5 tools
+**Probado en Claude Desktop (4/5 tools):**
+- `list_coverage` ✓
+- `list_datasets` ✓
+- `get_dataset_info` ✓
+- `get_data` clorofila + SST anomaly ✓ — límite 500k puntos funciona, Claude acota bbox automáticamente
 
-**Bugs conocidos:**
-- SST devuelve shape `(días, 1, lat, lon)` — dimensión `zlev` extra que hay que hacer squeeze en `_ds_to_json`
-
-**No existe todavía:**
-- `mcp_server/security.py`
-- `mcp_server/schema.py`
-- Scheduler no integrado al servidor
-- `skills/contracts/` vacío
-- Store Zarr sin datos (primer sync pendiente)
+**Pendiente para próxima sesión:**
+- Probar `update_data` en Claude Desktop
+- Probar on-demand (`source="mur_1km"`)
+- Probar los 3 skills
+- Docker (#9) y ChatMPA (#10) — para después
 
 ## Issues GitHub
 

@@ -3,7 +3,7 @@ erddap:
 
 datasets:
   chlorophyll:
-    default: "erdMH1chla8day_R2022NRT"
+    default: "erdMH1chla8day_R202SQ"
     on_demand:
       viirs_750m_npac: "erdVHNchla1day"      # 750m, solo Pacífico Norte (lon <= -110)
       viirs_750m_8day: "erdVHNchla8day"      # 750m, 8-day, solo Pacífico Norte

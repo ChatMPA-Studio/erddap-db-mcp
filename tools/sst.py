@@ -48,6 +48,8 @@ async def fetch_sst(
     e.constraints["longitude>="] = lon_min
     e.constraints["longitude<="] = lon_max
 
-    e.variables = [sst_var]
+    # griddap_initialize() already sets all variables (sst, anom, err, ice).
+    # Do not override e.variables — it breaks erddapy's internal query construction.
+    # The caller selects the specific variable via sst_var when reading.
     ds = e.to_xarray()
     return ds

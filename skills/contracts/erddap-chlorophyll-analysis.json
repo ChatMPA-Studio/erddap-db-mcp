@@ -55,7 +55,7 @@
     }
   },
   "notes": [
-    "Default dataset: erdMH1chla8day_R2022NRT (MODIS Aqua, 4km, 8-day, 2003-present)",
+    "Default dataset: erdMH1chla8day_R202SQ (MODIS Aqua, 4km, 8-day, 2003-present, Science Quality)",
     "Typical range for Mexican seas: 0.05-10 mg/m³",
     "NaN values indicate cloud cover — expected in daily/8-day composites",
     "High-res source viirs_750m_npac limited to Pacifico Norte (lon <= -110)"

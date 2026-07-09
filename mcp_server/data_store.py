@@ -8,11 +8,13 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+import os
+
 import numpy as np
 import xarray as xr
 import zarr
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR = Path(os.environ.get("ERDDAP_DATA_DIR", "C:/Users/carol/erddap-data/data"))
 META_DB = DATA_DIR / "metadata.db"
 
 
@@ -112,12 +114,16 @@ def load_local(variable: str, region: str, date_start: str, date_end: str) -> xr
 
 def save_to_store(ds: xr.Dataset, variable: str, region: str):
     """Append or create Zarr store for a variable+region."""
+    import numpy as np
     zarr_path = DATA_DIR / variable / region
     if zarr_path.exists():
-        existing = xr.open_zarr(zarr_path)
-        combined = xr.concat([existing, ds], dim="time")
-        combined = combined.drop_duplicates("time").sortby("time")
-        combined.to_zarr(zarr_path, mode="w")
+        # Drop timestamps already in the store before appending to avoid duplicates.
+        # (8-day composites at year boundaries can fall in two annual downloads.)
+        existing_times = xr.open_zarr(zarr_path).time.values
+        ds = ds.sel(time=~np.isin(ds.time.values, existing_times))
+        if len(ds.time) == 0:
+            return
+        ds.to_zarr(zarr_path, append_dim="time")
     else:
         zarr_path.mkdir(parents=True, exist_ok=True)
         ds.to_zarr(zarr_path, mode="w")

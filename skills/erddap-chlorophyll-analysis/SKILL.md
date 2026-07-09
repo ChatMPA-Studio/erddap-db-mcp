@@ -2,7 +2,7 @@
 name: erddap-chlorophyll-analysis
 description: Analyze chlorophyll-a patterns, trends, and anomalies for Mexican seas using MODIS Aqua data
 domain: erddap
-data-source: erdMH1chla8day_R2022NRT (NOAA CoastWatch ERDDAP)
+data-source: erdMH1chla8day_R202SQ (NOAA CoastWatch ERDDAP)
 output-type: text interpretation with data summary
 tags: [chlorophyll, ocean-color, pacific-mexico, gulf-mexico, productivity]
 status: draft

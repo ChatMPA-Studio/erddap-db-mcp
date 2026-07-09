@@ -6,6 +6,7 @@ Serves chlorophyll and SST data from NOAA CoastWatch ERDDAP.
 import mcp.server.stdio
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
+from mcp.server.lowlevel.server import NotificationOptions
 import mcp.types as types
 
 from tools.data_access import (
@@ -127,7 +128,7 @@ async def list_tools() -> list[types.Tool]:
                 "Get metadata for a specific ERDDAP dataset: spatial resolution, "
                 "temporal coverage, and geographic bounds. "
                 "Args:\n"
-                "  dataset_id (str): ERDDAP dataset ID (e.g. 'erdMH1chla8day_R2022NRT')"
+                "  dataset_id (str): ERDDAP dataset ID (e.g. 'erdMH1chla8day_R202SQ')"
             ),
             inputSchema={
                 "type": "object",
@@ -175,7 +176,7 @@ async def main():
                     server_name="erddap-db-mcp",
                     server_version="0.1.0",
                     capabilities=app.get_capabilities(
-                        notification_options=None,
+                        notification_options=NotificationOptions(),
                         experimental_capabilities={},
                     ),
                 ),

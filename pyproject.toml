@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "MCP server for chlorophyll and SST data from ERDDAP (NOAA CoastWatch)"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=2.0.0",
+    "fastmcp[server]>=2.0.0",
     "packaging>=21.0",
     "python-dotenv>=1.0.0",
     "erddapy>=2.0.0",

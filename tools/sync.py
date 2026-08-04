@@ -7,6 +7,7 @@ Called by the scheduler and by the update_data tool.
 """
 
 import asyncio
+import calendar
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -20,6 +21,7 @@ from mcp_server.data_store import (
     save_to_store,
 )
 from tools.chlorophyll import fetch_chlorophyll
+from tools.pp import fetch_pp
 from tools.sst import fetch_sst
 
 logger = logging.getLogger(__name__)
@@ -34,8 +36,9 @@ with open(CONFIG_PATH) as f:
 
 # Full historical start dates per variable
 HISTORY_START = {
-    "chlorophyll": date(2003, 1, 1),   # MODIS Aqua available from 2003
-    "sst": date(1981, 9, 1),           # OISST available from Sep 1981
+    "chlorophyll": date(2003, 1, 1),            # MODIS Aqua available from 2003
+    "primary_productivity": date(2003, 1, 5),   # erdMH1pp8day starts 2003-01-05
+    "sst": date(1981, 9, 1),                    # OISST available from Sep 1981
 }
 
 
@@ -53,7 +56,7 @@ async def run_sync(variable: str = "all", region: str = "all") -> dict:
         logger.warning(msg)
         return {"results": [{"status": "server_unavailable", "server": server}], "synced_at": datetime.utcnow().isoformat()}
 
-    variables = ["chlorophyll", "sst"] if variable == "all" else [variable]
+    variables = ["chlorophyll", "primary_productivity", "sst"] if variable == "all" else [variable]
     regions = list(CONFIG["regions"].keys()) if region == "all" else [region]
 
     results = []
@@ -63,8 +66,11 @@ async def run_sync(variable: str = "all", region: str = "all") -> dict:
         logger.info("Dataset %s max available date: %s", dataset_id, dataset_max)
         for reg in regions:
             bbox = CONFIG["regions"][reg]["bbox"]
-            year_results = await _sync_by_year(var, dataset_id, reg, bbox, dataset_max)
-            results.extend(year_results)
+            if var == "primary_productivity":
+                chunk_results = await _sync_by_quarter(var, dataset_id, reg, bbox, dataset_max)
+            else:
+                chunk_results = await _sync_by_year(var, dataset_id, reg, bbox, dataset_max)
+            results.extend(chunk_results)
 
     return {"results": results, "synced_at": datetime.utcnow().isoformat()}
 
@@ -101,6 +107,71 @@ async def _sync_by_year(
             year_start.isoformat(), year_end.isoformat(), year,
         )
         results.append(result)
+
+    if not results:
+        results.append({"variable": variable, "region": region, "status": "up_to_date"})
+
+    return results
+
+
+def _covered_date_ranges(variable: str, region: str) -> list[tuple[date, date]]:
+    """Return list of (start, end) date ranges already in the local store."""
+    records = [r for r in get_local_coverage(variable) if r["region"] == region]
+    return [
+        (datetime.fromisoformat(r["date_start"]).date(),
+         datetime.fromisoformat(r["date_end"]).date())
+        for r in records
+    ]
+
+
+def _is_chunk_covered(chunk_start: date, chunk_end: date, covered: list[tuple[date, date]]) -> bool:
+    """True if any single record in covered spans the entire chunk."""
+    return any(s <= chunk_start and e >= chunk_end for s, e in covered)
+
+
+# Quarter boundaries (start_month, end_month)
+_QUARTERS = [(1, 3), (4, 6), (7, 9), (10, 12)]
+
+
+async def _sync_by_quarter(
+    variable: str,
+    dataset_id: str,
+    region: str,
+    bbox: list,
+    dataset_max: date,
+) -> list[dict]:
+    """Download missing quarterly chunks for PP. Skips chunks already in the store."""
+    results = []
+    covered = _covered_date_ranges(variable, region)
+
+    for year in range(HISTORY_START[variable].year, dataset_max.year + 1):
+        for q_idx, (sm, em) in enumerate(_QUARTERS):
+            q_start = date(year, sm, 1)
+            q_end = date(year, em, calendar.monthrange(year, em)[1])
+
+            # Clip to dataset availability window
+            q_start = max(q_start, HISTORY_START[variable])
+            q_end = min(q_end, dataset_max)
+
+            if q_start > dataset_max:
+                break  # rest of year is beyond dataset
+            if q_end < HISTORY_START[variable]:
+                continue
+
+            if _is_chunk_covered(q_start, q_end, covered):
+                logger.debug(
+                    "Skipping %s %s %d Q%d — already downloaded.",
+                    variable, region, year, q_idx + 1,
+                )
+                continue
+
+            logger.info("Downloading %s | %s | %d Q%d...", variable, region, year, q_idx + 1)
+            result = await _fetch_with_retry(
+                variable, dataset_id, region, bbox,
+                q_start.isoformat(), q_end.isoformat(), year,
+            )
+            result["quarter"] = q_idx + 1
+            results.append(result)
 
     if not results:
         results.append({"variable": variable, "region": region, "status": "up_to_date"})
@@ -186,6 +257,8 @@ async def _fetch_with_retry(
         try:
             if variable == "chlorophyll":
                 ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
+            elif variable == "primary_productivity":
+                ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
             else:
                 ds = await fetch_sst(dataset_id, bbox, date_start, date_end)
 

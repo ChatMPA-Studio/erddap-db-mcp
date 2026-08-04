@@ -19,6 +19,7 @@ from mcp_server.data_store import (
 )
 from mcp_server.security import validate_get_data_args
 from tools.chlorophyll import fetch_chlorophyll
+from tools.pp import fetch_pp
 from tools.sst import fetch_sst
 
 CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
@@ -63,6 +64,8 @@ async def get_data(args: dict) -> str:
 
     if variable == "chlorophyll":
         ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
+    elif variable == "primary_productivity":
+        ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
     else:
         ds = await fetch_sst(dataset_id, bbox, date_start, date_end, sst_var=sst_var)
 
@@ -144,7 +147,7 @@ MAX_POINTS = 500_000  # ~2MB JSON; beyond this, instruct the model to narrow the
 
 def _ds_to_json(ds, variable: str, source: str, sst_var: str = "sst") -> str:
     import numpy as np
-    data_var = next(iter(ds.data_vars)) if variable == "chlorophyll" else sst_var
+    data_var = sst_var if variable == "sst" else next(iter(ds.data_vars))
     arr = ds[data_var].squeeze().values
     n_points = arr.size
     shape = list(arr.shape)

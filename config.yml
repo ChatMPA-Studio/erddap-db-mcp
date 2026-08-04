@@ -7,6 +7,8 @@ datasets:
     on_demand:
       viirs_750m_npac: "erdVHNchla1day"      # 750m, solo Pacífico Norte (lon <= -110)
       viirs_750m_8day: "erdVHNchla8day"      # 750m, 8-day, solo Pacífico Norte
+  primary_productivity:
+    default: "erdMH1pp8day"                  # MODIS Aqua, 8-day, 4km, 2003–presente
   sst:
     default: "ncdcOisst21Agg_LonPM180"
     on_demand:

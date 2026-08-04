@@ -5,7 +5,7 @@ Input validation for MCP tool arguments.
 from datetime import date
 
 
-VALID_VARIABLES = {"chlorophyll", "sst"}
+VALID_VARIABLES = {"chlorophyll", "primary_productivity", "sst"}
 VALID_SST_VARS = {"sst", "anom", "err", "ice"}
 VALID_REGIONS = {"pacific_mexico", "gulf_mexico", "all"}
 

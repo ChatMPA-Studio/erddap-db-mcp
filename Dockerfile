@@ -15,6 +15,7 @@ COPY tools/ tools/
 COPY scheduler/ scheduler/
 COPY skills/ skills/
 COPY config.yml .
+COPY run_initial_sync.py .
 COPY healthcheck.py .
 
 RUN groupadd --gid 1000 mcp && \

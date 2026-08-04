@@ -1,69 +1,53 @@
 """
-Scans skills/*/SKILL.md at startup and registers them as MCP prompts.
+prompts — auto-discovers skills/*/SKILL.md and registers them as MCP prompts.
 """
 
-import re
+from __future__ import annotations
+import logging
 from pathlib import Path
 
-import mcp.types as types
+logger = logging.getLogger("erddap_mcp.prompts")
 
-SKILLS_DIR = Path(__file__).parent.parent / "skills"
+_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """Extract YAML frontmatter and body from a SKILL.md file."""
-    match = re.match(r"^---\n(.*?)\n---\n(.*)", text, re.DOTALL)
-    if not match:
+    if not text.startswith("---"):
         return {}, text
-    raw_meta, body = match.group(1), match.group(2)
-    meta = {}
-    for line in raw_meta.splitlines():
+    end = text.index("---", 3)
+    fm_block = text[3:end].strip()
+    body = text[end + 3:].strip()
+    meta: dict = {}
+    for line in fm_block.splitlines():
         if ":" in line:
-            key, _, val = line.partition(":")
-            meta[key.strip()] = val.strip()
-    return meta, body.strip()
+            k, _, v = line.partition(":")
+            meta[k.strip()] = v.strip().strip('"').strip("'")
+    return meta, body
 
 
-def _load_skill(skill_dir: Path) -> types.Prompt | None:
-    skill_file = skill_dir / "SKILL.md"
-    if not skill_file.exists():
-        return None
-    text = skill_file.read_text(encoding="utf-8")
-    meta, body = _parse_frontmatter(text)
-    if not meta.get("name"):
-        return None
-    return types.Prompt(
-        name=meta["name"],
-        description=meta.get("description", ""),
-        arguments=[],
-    )
+def discover_prompts(mcp) -> None:
+    """Scan skills/*/SKILL.md and register each as an @mcp.prompt."""
+    if not _SKILLS_DIR.exists():
+        logger.warning("Skills directory not found: %s", _SKILLS_DIR)
+        return
 
+    for skill_file in sorted(_SKILLS_DIR.glob("*/SKILL.md")):
+        try:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, body = _parse_frontmatter(text)
 
-def load_skills() -> list[types.Prompt]:
-    prompts = []
-    for skill_dir in sorted(SKILLS_DIR.iterdir()):
-        if skill_dir.is_dir() and not skill_dir.name.startswith("_"):
-            prompt = _load_skill(skill_dir)
-            if prompt:
-                prompts.append(prompt)
-    return prompts
+            name = meta.get("name") or skill_file.parent.name
+            description = meta.get("description", "")
+            skill_body = body
 
+            def _make_prompt(n: str, d: str, b: str):
+                @mcp.prompt(name=n, description=d)
+                def _prompt() -> str:
+                    return b
+                return _prompt
 
-def get_skill(name: str, arguments: dict | None) -> types.GetPromptResult:
-    for skill_dir in SKILLS_DIR.iterdir():
-        skill_file = skill_dir / "SKILL.md"
-        if not skill_file.exists():
-            continue
-        text = skill_file.read_text(encoding="utf-8")
-        meta, body = _parse_frontmatter(text)
-        if meta.get("name") == name:
-            return types.GetPromptResult(
-                description=meta.get("description", ""),
-                messages=[
-                    types.PromptMessage(
-                        role="user",
-                        content=types.TextContent(type="text", text=body),
-                    )
-                ],
-            )
-    raise ValueError(f"Skill not found: {name}")
+            _make_prompt(name, description, skill_body)
+            logger.info("Registered prompt: %s", name)
+
+        except Exception as e:
+            logger.error("Failed to load skill '%s': %s", skill_file, e)

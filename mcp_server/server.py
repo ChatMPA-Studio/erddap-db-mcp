@@ -1,190 +1,108 @@
-"""
-ERDDAP MCP Server
-Serves chlorophyll and SST data from NOAA CoastWatch ERDDAP.
+"""ERDDAP MCP Server — FastMCP entry point.
+
+Supports two transports:
+- stdio  (default, for Claude Desktop)
+- streamable-http (when PORT env var is set, for droplet deployment)
 """
 
-import mcp.server.stdio
-from mcp.server import Server
-from mcp.server.models import InitializationOptions
-from mcp.server.lowlevel.server import NotificationOptions
-import mcp.types as types
+import logging
+from contextlib import asynccontextmanager
+from typing import Union
+
+from fastmcp import FastMCP
 
 from tools.data_access import (
-    get_data,
-    list_coverage,
-    update_data,
-    list_datasets,
-    get_dataset_info,
+    get_data as _get_data,
+    list_coverage as _list_coverage,
+    update_data as _update_data,
+    list_datasets as _list_datasets,
+    get_dataset_info as _get_dataset_info,
 )
-from mcp_server.prompts import load_skills
+from mcp_server.prompts import discover_prompts
 from scheduler.sync_scheduler import start_scheduler
 
-app = Server("erddap-db-mcp")
+logger = logging.getLogger(__name__)
 
 
-@app.list_tools()
-async def list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="get_data",
-            description=(
-                "Extract chlorophyll or SST data for a bounding box and date range. "
-                "Queries local store first; falls back to ERDDAP if data is missing. "
-                "Args:\n"
-                "  variable (str): 'chlorophyll' or 'sst'\n"
-                "  bbox (list): [lon_min, lon_max, lat_min, lat_max] or region shorthand "
-                "('pacific_mexico', 'gulf_mexico')\n"
-                "  date_range (list): ['YYYY-MM-DD', 'YYYY-MM-DD']\n"
-                "  source (str, optional): 'auto' (default), or on-demand dataset key "
-                "from config (e.g. 'mur_1km', 'viirs_s3_2km')\n"
-                "  sst_var (str, optional): for SST only — which variable to extract: "
-                "'sst' (default), 'anom' (anomaly vs climatology), 'err' (measurement error), "
-                "'ice' (sea ice concentration)"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "variable": {"type": "string", "enum": ["chlorophyll", "sst"]},
-                    "bbox": {
-                        "oneOf": [
-                            {"type": "string", "enum": ["pacific_mexico", "gulf_mexico"]},
-                            {
-                                "type": "array",
-                                "items": {"type": "number"},
-                                "minItems": 4,
-                                "maxItems": 4,
-                            },
-                        ]
-                    },
-                    "date_range": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "minItems": 2,
-                        "maxItems": 2,
-                    },
-                    "source": {"type": "string", "default": "auto"},
-                    "sst_var": {
-                        "type": "string",
-                        "enum": ["sst", "anom", "err", "ice"],
-                        "default": "sst",
-                    },
-                },
-                "required": ["variable", "bbox", "date_range"],
-            },
-        ),
-        types.Tool(
-            name="list_coverage",
-            description=(
-                "Report what data is available in the local store. "
-                "Returns variables, date ranges, and regions currently downloaded. "
-                "Args:\n"
-                "  variable (str, optional): filter by 'chlorophyll' or 'sst'"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "variable": {"type": "string", "enum": ["chlorophyll", "sst"]},
-                },
-            },
-        ),
-        types.Tool(
-            name="update_data",
-            description=(
-                "Manually trigger a data refresh from ERDDAP for a variable and region. "
-                "Downloads data up to the current date. "
-                "Args:\n"
-                "  variable (str): 'chlorophyll' or 'sst'\n"
-                "  region (str, optional): 'pacific_mexico', 'gulf_mexico', or 'all' (default)"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "variable": {"type": "string", "enum": ["chlorophyll", "sst"]},
-                    "region": {"type": "string", "default": "all"},
-                },
-                "required": ["variable"],
-            },
-        ),
-        types.Tool(
-            name="list_datasets",
-            description=(
-                "Search for available datasets on NOAA CoastWatch ERDDAP for a variable. "
-                "Args:\n"
-                "  variable (str): 'chlorophyll' or 'sst'\n"
-                "  query (str, optional): additional search keywords"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "variable": {"type": "string", "enum": ["chlorophyll", "sst"]},
-                    "query": {"type": "string"},
-                },
-                "required": ["variable"],
-            },
-        ),
-        types.Tool(
-            name="get_dataset_info",
-            description=(
-                "Get metadata for a specific ERDDAP dataset: spatial resolution, "
-                "temporal coverage, and geographic bounds. "
-                "Args:\n"
-                "  dataset_id (str): ERDDAP dataset ID (e.g. 'erdMH1chla8day_R202SQ')"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "dataset_id": {"type": "string"},
-                },
-                "required": ["dataset_id"],
-            },
-        ),
-    ]
-
-
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    handlers = {
-        "get_data": get_data,
-        "list_coverage": list_coverage,
-        "update_data": update_data,
-        "list_datasets": list_datasets,
-        "get_dataset_info": get_dataset_info,
-    }
-    result = await handlers[name](arguments)
-    return [types.TextContent(type="text", text=result)]
-
-
-@app.list_prompts()
-async def list_prompts() -> list[types.Prompt]:
-    return load_skills()
-
-
-@app.get_prompt()
-async def get_prompt(name: str, arguments: dict | None) -> types.GetPromptResult:
-    from mcp_server.prompts import get_skill
-    return get_skill(name, arguments)
-
-
-async def main():
+@asynccontextmanager
+async def lifespan(server: FastMCP):
     scheduler = start_scheduler()
     try:
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await app.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="erddap-db-mcp",
-                    server_version="0.1.0",
-                    capabilities=app.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                ),
-            )
+        yield
     finally:
         scheduler.shutdown(wait=False)
 
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+mcp = FastMCP("erddap-db-mcp", lifespan=lifespan)
+
+
+@mcp.tool()
+async def get_data(
+    variable: str,
+    bbox: Union[str, list],
+    date_range: list[str],
+    source: str = "auto",
+    sst_var: str = "sst",
+) -> str:
+    """Extract chlorophyll or SST data for a bounding box and date range.
+
+    variable: 'chlorophyll' or 'sst'
+    bbox: [lon_min, lon_max, lat_min, lat_max] or 'pacific_mexico'/'gulf_mexico'
+    date_range: ['YYYY-MM-DD', 'YYYY-MM-DD']
+    source: 'auto' (default) or on-demand dataset key (e.g. 'mur_1km')
+    sst_var: 'sst' (default), 'anom', 'err', or 'ice'
+    """
+    return await _get_data({
+        "variable": variable,
+        "bbox": bbox,
+        "date_range": date_range,
+        "source": source,
+        "sst_var": sst_var,
+    })
+
+
+@mcp.tool()
+async def list_coverage(variable: str = None) -> str:
+    """Report what data is available in the local store.
+
+    variable: optional filter — 'chlorophyll' or 'sst'
+    """
+    args = {}
+    if variable:
+        args["variable"] = variable
+    return await _list_coverage(args)
+
+
+@mcp.tool()
+async def update_data(variable: str, region: str = "all") -> str:
+    """Manually trigger a data refresh from ERDDAP for a variable and region.
+
+    variable: 'chlorophyll' or 'sst'
+    region: 'pacific_mexico', 'gulf_mexico', or 'all' (default)
+    """
+    return await _update_data({"variable": variable, "region": region})
+
+
+@mcp.tool()
+async def list_datasets(variable: str, query: str = None) -> str:
+    """Search for available datasets on NOAA CoastWatch ERDDAP.
+
+    variable: 'chlorophyll' or 'sst'
+    query: optional additional search keywords
+    """
+    args = {"variable": variable}
+    if query:
+        args["query"] = query
+    return await _list_datasets(args)
+
+
+@mcp.tool()
+async def get_dataset_info(dataset_id: str) -> str:
+    """Get metadata for a specific ERDDAP dataset.
+
+    dataset_id: ERDDAP dataset ID (e.g. 'erdMH1chla8day_R202SQ')
+    """
+    return await _get_dataset_info({"dataset_id": dataset_id})
+
+
+discover_prompts(mcp)

@@ -1,11 +1,32 @@
 services:
   erddap-mcp:
     build: .
+    container_name: erddap-mcp
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8003}:${PORT:-8000}"
     volumes:
-      - erddap_data:/app/data
-    restart: unless-stopped
+      - /data/zarr:/app/data
+    env_file:
+      - .env
     environment:
-      - PYTHONUNBUFFERED=1
-
-volumes:
-  erddap_data:
+      - PORT=${PORT:-8000}
+      - MCP_BASE_PATH=${MCP_BASE_PATH:-/mcp}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ERDDAP_DATA_DIR=/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"

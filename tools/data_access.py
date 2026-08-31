@@ -206,7 +206,7 @@ def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_var
     result: dict = {"time": [str(t)[:10] for t in ds.time.values]}
 
     for v in vars_to_return:
-        arr = ds[v].mean(dim=[lat_dim, lon_dim], skipna=True).values
+        arr = ds[v].mean(dim=[lat_dim, lon_dim], skipna=True).squeeze().values
         out_key = v if variable == "sst" else variable
         result[out_key] = [None if np.isnan(x) else round(float(x), 5) for x in arr]
 

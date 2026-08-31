@@ -156,11 +156,15 @@ def _bbox_to_region_key(bbox: list) -> tuple[str, bool]:
 
 
 def _clip_to_bbox(ds, bbox: list):
-    """Clip xarray Dataset to a lon/lat bounding box."""
+    """Clip xarray Dataset to a lon/lat bounding box. Handles ascending/descending coords."""
     lon_min, lon_max, lat_min, lat_max = bbox
     lat_dim = "latitude" if "latitude" in ds.dims else "lat"
     lon_dim = "longitude" if "longitude" in ds.dims else "lon"
-    return ds.sel({lat_dim: slice(lat_min, lat_max), lon_dim: slice(lon_min, lon_max)})
+    lat_vals = ds[lat_dim].values
+    lon_vals = ds[lon_dim].values
+    lat_slice = slice(lat_max, lat_min) if lat_vals[0] > lat_vals[-1] else slice(lat_min, lat_max)
+    lon_slice = slice(lon_max, lon_min) if lon_vals[0] > lon_vals[-1] else slice(lon_min, lon_max)
+    return ds.sel({lat_dim: lat_slice, lon_dim: lon_slice})
 
 
 MAX_POINTS = 500_000  # ~2MB JSON; applies only to pixel-level (non-aggregated) responses

@@ -52,8 +52,11 @@ async def get_data(args: dict) -> str:
     date_start, date_end = date_range[0], date_range[1]
 
     if source == "auto":
-        ds = load_local(variable, _bbox_to_region_key(bbox), date_start, date_end)
+        region_key, exact_match = _bbox_to_region_key(bbox)
+        ds = load_local(variable, region_key, date_start, date_end)
         if ds is not None:
+            if not exact_match:
+                ds = _clip_to_bbox(ds, bbox)
             return _ds_to_json(ds, variable, source="local", sst_var=sst_var,
                                sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
 
@@ -140,11 +143,24 @@ def _resolve_dataset_id(variable: str, source: str) -> str:
     return on_demand[source]
 
 
-def _bbox_to_region_key(bbox: list) -> str:
+def _bbox_to_region_key(bbox: list) -> tuple[str, bool]:
+    """Return (region_key, is_exact_match). Falls back to containing region for sub-bboxes."""
     for name, cfg in CONFIG["regions"].items():
         if cfg["bbox"] == bbox:
-            return name
-    return f"custom_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}"
+            return name, True
+    for name, cfg in CONFIG["regions"].items():
+        r = cfg["bbox"]  # [lon_min, lon_max, lat_min, lat_max]
+        if r[0] <= bbox[0] and bbox[1] <= r[1] and r[2] <= bbox[2] and bbox[3] <= r[3]:
+            return name, False
+    return f"custom_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}", False
+
+
+def _clip_to_bbox(ds, bbox: list):
+    """Clip xarray Dataset to a lon/lat bounding box."""
+    lon_min, lon_max, lat_min, lat_max = bbox
+    lat_dim = "latitude" if "latitude" in ds.dims else "lat"
+    lon_dim = "longitude" if "longitude" in ds.dims else "lon"
+    return ds.sel({lat_dim: slice(lat_min, lat_max), lon_dim: slice(lon_min, lon_max)})
 
 
 MAX_POINTS = 500_000  # ~2MB JSON; applies only to pixel-level (non-aggregated) responses

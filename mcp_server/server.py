@@ -7,7 +7,7 @@ Supports two transports:
 
 import logging
 from contextlib import asynccontextmanager
-from typing import Union
+from typing import Optional, Union
 
 from fastmcp import FastMCP
 
@@ -43,6 +43,8 @@ async def get_data(
     date_range: list[str],
     source: str = "auto",
     sst_var: str = "sst",
+    sst_vars: Optional[list[str]] = None,
+    aggregate_spatial: bool = False,
 ) -> str:
     """Extract chlorophyll or SST data for a bounding box and date range.
 
@@ -50,7 +52,11 @@ async def get_data(
     bbox: [lon_min, lon_max, lat_min, lat_max] or 'pacific_mexico'/'gulf_mexico'
     date_range: ['YYYY-MM-DD', 'YYYY-MM-DD']
     source: 'auto' (default) or on-demand dataset key (e.g. 'mur_1km')
-    sst_var: 'sst' (default), 'anom', 'err', or 'ice'
+    sst_var: 'sst' (default), 'anom', 'err', or 'ice' — single variable (ignored when sst_vars set)
+    sst_vars: list of SST variables to return together, e.g. ['sst', 'anom'] (variable='sst' only)
+    aggregate_spatial: if True, collapse lat/lon → return one value per timestep as columnar
+      JSON {time:[...], var:[...]}. Enables multi-year date ranges (up to 60 years). Recommended
+      for skill workflows that need full time series (MHW detection, SST anomaly, chlorophyll trends).
     """
     return await _get_data({
         "variable": variable,
@@ -58,6 +64,8 @@ async def get_data(
         "date_range": date_range,
         "source": source,
         "sst_var": sst_var,
+        "sst_vars": sst_vars,
+        "aggregate_spatial": aggregate_spatial,
     })
 
 

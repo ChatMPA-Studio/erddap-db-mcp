@@ -46,13 +46,16 @@ async def get_data(args: dict) -> str:
     date_range = args["date_range"]
     source = args.get("source", "auto")
     sst_var = args.get("sst_var", "sst")
+    sst_vars = args.get("sst_vars", None)
+    aggregate_spatial = bool(args.get("aggregate_spatial", False))
 
     date_start, date_end = date_range[0], date_range[1]
 
     if source == "auto":
         ds = load_local(variable, _bbox_to_region_key(bbox), date_start, date_end)
         if ds is not None:
-            return _ds_to_json(ds, variable, source="local", sst_var=sst_var)
+            return _ds_to_json(ds, variable, source="local", sst_var=sst_var,
+                               sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
 
     dataset_id = _resolve_dataset_id(variable, source)
 
@@ -60,7 +63,8 @@ async def get_data(args: dict) -> str:
     if cached:
         import xarray as xr
         ds = xr.open_zarr(cached)
-        return _ds_to_json(ds, variable, source="cache", sst_var=sst_var)
+        return _ds_to_json(ds, variable, source="cache", sst_var=sst_var,
+                           sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
 
     if variable == "chlorophyll":
         ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
@@ -75,7 +79,8 @@ async def get_data(args: dict) -> str:
         ds.to_zarr(cache_path, mode="w")
         register_cache(dataset_id, bbox, date_start, date_end, str(cache_path))
 
-    return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var)
+    return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var,
+                       sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
 
 
 async def list_coverage(args: dict) -> str:
@@ -142,24 +147,76 @@ def _bbox_to_region_key(bbox: list) -> str:
     return f"custom_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}"
 
 
-MAX_POINTS = 500_000  # ~2MB JSON; beyond this, instruct the model to narrow the query
+MAX_POINTS = 500_000  # ~2MB JSON; applies only to pixel-level (non-aggregated) responses
 
 
-def _ds_to_json(ds, variable: str, source: str, sst_var: str = "sst") -> str:
+def _ds_to_json(
+    ds,
+    variable: str,
+    source: str,
+    sst_var: str = "sst",
+    sst_vars=None,
+    aggregate_spatial: bool = False,
+) -> str:
     import numpy as np
+
+    if aggregate_spatial:
+        return _ds_to_json_aggregated(ds, variable, source, sst_var, sst_vars)
+    else:
+        return _ds_to_json_pixel(ds, variable, source, sst_var)
+
+
+def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_vars) -> str:
+    """Collapse lat/lon → one value per timestep. No size limit applies."""
+    import numpy as np
+
+    lat_dim = "latitude" if "latitude" in ds.dims else "lat"
+    lon_dim = "longitude" if "longitude" in ds.dims else "lon"
+
+    if variable == "sst":
+        vars_to_return = sst_vars if sst_vars else [sst_var]
+        vars_to_return = [v for v in vars_to_return if v in ds.data_vars]
+        if not vars_to_return:
+            vars_to_return = [sst_var]
+    else:
+        # chlorophyll / pp: use first data var, expose as the variable name (e.g. "chlorophyll")
+        raw_var = next(iter(ds.data_vars))
+        vars_to_return = [raw_var]
+
+    result: dict = {"time": [str(t)[:10] for t in ds.time.values]}
+
+    for v in vars_to_return:
+        arr = ds[v].mean(dim=[lat_dim, lon_dim], skipna=True).values
+        out_key = v if variable == "sst" else variable
+        result[out_key] = [None if np.isnan(x) else round(float(x), 5) for x in arr]
+
+    return json.dumps({
+        "data": result,
+        "meta": {
+            "variable": variable,
+            "source": source,
+            "aggregate_spatial": True,
+            "n_timesteps": len(ds.time),
+        },
+    })
+
+
+def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str) -> str:
+    """Return 3D array format for pixel-level data (original behavior)."""
+    import numpy as np
+
     data_var = sst_var if variable == "sst" else next(iter(ds.data_vars))
     arr = ds[data_var].squeeze().values
     n_points = arr.size
     shape = list(arr.shape)
 
     if n_points > MAX_POINTS:
-        shape = list(arr.shape)
         return json.dumps({
             "error": "response_too_large",
             "message": (
                 f"Query returned {n_points:,} data points {shape}, which exceeds the "
-                f"{MAX_POINTS:,}-point limit. Narrow the request by reducing the bbox, "
-                f"shortening the date range, or querying one timestep at a time."
+                f"{MAX_POINTS:,}-point limit. Use aggregate_spatial=True to get a "
+                f"spatial-mean time series, or narrow bbox/date_range."
             ),
             "meta": {"variable": variable, "source": source, "shape": shape},
         })

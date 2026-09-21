@@ -250,8 +250,8 @@ async def _fetch_with_retry(
     year: int,
 ) -> dict:
     """Fetch one year of data with exponential backoff retries."""
-    from mcp_server.data_store import DATA_DIR
-    zarr_path = str(DATA_DIR / variable / region)
+    from mcp_server.data_store import store_zarr_uri
+    zarr_path = store_zarr_uri(variable, region)
 
     for attempt in range(MAX_RETRIES):
         try:

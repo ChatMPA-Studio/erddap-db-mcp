@@ -11,6 +11,8 @@ from pathlib import Path
 import yaml
 
 from mcp_server.data_store import (
+    STORAGE_OPTIONS,
+    cache_zarr_uri,
     get_cache_path,
     get_local_coverage,
     init_db,
@@ -65,7 +67,7 @@ async def get_data(args: dict) -> str:
     cached = get_cache_path(dataset_id, bbox, date_start, date_end)
     if cached:
         import xarray as xr
-        ds = xr.open_zarr(cached)
+        ds = xr.open_zarr(cached, storage_options=STORAGE_OPTIONS)
         return _ds_to_json(ds, variable, source="cache", sst_var=sst_var,
                            sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
 
@@ -77,10 +79,9 @@ async def get_data(args: dict) -> str:
         ds = await fetch_sst(dataset_id, bbox, date_start, date_end, sst_var=sst_var)
 
     if source != "auto":
-        from mcp_server.data_store import DATA_DIR
-        cache_path = DATA_DIR / "cache" / f"{dataset_id}_{date_start}_{date_end}"
-        ds.to_zarr(cache_path, mode="w")
-        register_cache(dataset_id, bbox, date_start, date_end, str(cache_path))
+        cache_path = cache_zarr_uri(dataset_id, bbox, date_start, date_end)
+        ds.to_zarr(cache_path, mode="w", storage_options=STORAGE_OPTIONS)
+        register_cache(dataset_id, bbox, date_start, date_end, cache_path)
 
     return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var,
                        sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)

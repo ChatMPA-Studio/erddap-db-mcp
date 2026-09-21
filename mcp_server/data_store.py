@@ -1,68 +1,134 @@
 """
-Local data store manager.
-Handles Zarr stores for raster data and SQLite for download metadata.
+Storage manager — Fase 1 de la migración a AWS.
+
+Los datos (arrays de clorofila/SST) siguen siendo Zarr — solo cambia dónde
+viven: de disco local a un bucket S3, vía s3fs/fsspec (Zarr es el backend
+nativo del formato para object storage, no un workaround).
+
+La metadata (antes SQLite: tablas `downloads` y `cache`) pasa a una sola
+tabla de DynamoDB con dos formas de ítem, distinguidas por `item_type`:
+  - "download": catálogo permanente. PK "{variable}#{region}", SK date_start.
+  - "cache":    cache on-demand con TTL nativo. PK "cache#{dataset_id}#{bbox_hash}",
+                SK "{date_start}#{date_end}". `expires_at` es el atributo TTL
+                de la tabla (debe ser epoch en segundos, no ISO string).
+
+Mismo estilo que la versión de disco local que reemplaza: llamadas síncronas
+directas, sin locks ni executors — eso es trabajo de la Fase 2, no de esta.
 """
 
+import hashlib
 import json
-import sqlite3
-from datetime import datetime
-from pathlib import Path
-
 import os
+from datetime import datetime, timedelta, timezone
 
+import boto3
 import numpy as np
+import s3fs
 import xarray as xr
-import zarr
+from boto3.dynamodb.conditions import Attr
 
-DATA_DIR = Path(os.environ.get("ERDDAP_DATA_DIR", "C:/Users/carol/erddap-data/data"))
-META_DB = DATA_DIR / "metadata.db"
+AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
+S3_BUCKET = os.environ.get("ERDDAP_S3_BUCKET", "erddap-mcp-data")
+S3_PREFIX = os.environ.get("ERDDAP_S3_PREFIX", "erddap").strip("/")
+DYNAMODB_TABLE = os.environ.get("ERDDAP_DYNAMODB_TABLE", "erddap-catalog")
+
+# xarray/zarr usan storage_options (formato fsspec) para autenticar contra S3.
+# En Fargate esto viene del task role — no hace falta poner llaves aquí.
+STORAGE_OPTIONS = {"client_kwargs": {"region_name": AWS_REGION}}
+
+
+def _s3fs_fs() -> s3fs.S3FileSystem:
+    # skip_instance_cache evita que fsspec reutilice un cliente creado bajo un
+    # mock de AWS distinto (relevante en tests con moto).
+    return s3fs.S3FileSystem(**STORAGE_OPTIONS, skip_instance_cache=True)
+
+
+def _s3_key(*parts: str) -> str:
+    return "/".join([S3_PREFIX, *parts])
+
+
+def _s3_uri(*parts: str) -> str:
+    return f"s3://{S3_BUCKET}/{_s3_key(*parts)}"
+
+
+def _dynamodb_table():
+    return boto3.resource("dynamodb", region_name=AWS_REGION).Table(DYNAMODB_TABLE)
+
+
+def _bbox_hash(bbox: list) -> str:
+    return hashlib.sha1(json.dumps(bbox).encode()).hexdigest()[:12]
+
+
+def cache_zarr_uri(dataset_id: str, bbox: list, date_start: str, date_end: str) -> str:
+    """S3 URI para un store de cache on-demand. Usa el mismo hash de bbox que
+    la llave de DynamoDB, para que ambos lados coincidan."""
+    name = f"{dataset_id}_{_bbox_hash(bbox)}_{date_start}_{date_end}"
+    return _s3_uri("cache", name)
+
+
+def store_zarr_uri(variable: str, region: str) -> str:
+    """S3 URI del store permanente de una variable+región — lo que save_to_store
+    usa por dentro. Expuesta para que quien registre el catálogo (tools/sync.py)
+    no necesite conocer _s3_uri (privada) para saber dónde quedó guardado."""
+    return _s3_uri(variable, region)
 
 
 def init_db():
-    """Initialize SQLite metadata database."""
-    META_DB.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(META_DB) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS downloads (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                variable TEXT NOT NULL,
-                dataset_id TEXT NOT NULL,
-                region TEXT NOT NULL,
-                date_start TEXT NOT NULL,
-                date_end TEXT NOT NULL,
-                downloaded_at TEXT NOT NULL,
-                zarr_path TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS cache (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                dataset_id TEXT NOT NULL,
-                bbox TEXT NOT NULL,
-                date_start TEXT NOT NULL,
-                date_end TEXT NOT NULL,
-                cached_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                zarr_path TEXT NOT NULL
-            )
-        """)
-        conn.commit()
+    """Verifica que la tabla de DynamoDB y el bucket S3 ya existan.
 
+    No los crea: eso es trabajo de Terraform/infra (arquitectura-resultante-mcp.pdf,
+    sección 07) — el task role de esta app solo debería tener permiso de leer/
+    escribir ítems y objetos, no de crear tablas o buckets. Si algo falta,
+    falla rápido y con un mensaje claro en vez de intentar arreglarlo solo.
+    """
+    ddb_client = boto3.client("dynamodb", region_name=AWS_REGION)
+    try:
+        ddb_client.describe_table(TableName=DYNAMODB_TABLE)
+    except ddb_client.exceptions.ResourceNotFoundException:
+        raise RuntimeError(
+            f"La tabla DynamoDB '{DYNAMODB_TABLE}' no existe. Debe crearla la "
+            f"infraestructura (Terraform), no esta app."
+        )
+
+    s3_client = boto3.client("s3", region_name=AWS_REGION)
+    try:
+        s3_client.head_bucket(Bucket=S3_BUCKET)
+    except Exception as exc:
+        raise RuntimeError(
+            f"El bucket S3 '{S3_BUCKET}' no existe o no es accesible. Debe "
+            f"crearlo la infraestructura (Terraform), no esta app."
+        ) from exc
+
+
+# --- catálogo permanente (downloads) ---
 
 def get_local_coverage(variable: str | None = None) -> list[dict]:
     """Return list of locally available data records."""
-    with sqlite3.connect(META_DB) as conn:
-        conn.row_factory = sqlite3.Row
-        if variable:
-            rows = conn.execute(
-                "SELECT * FROM downloads WHERE variable = ? ORDER BY date_start",
-                (variable,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM downloads ORDER BY variable, date_start"
-            ).fetchall()
-    return [dict(r) for r in rows]
+    table = _dynamodb_table()
+    filter_expr = Attr("item_type").eq("download")
+    if variable:
+        filter_expr = filter_expr & Attr("variable").eq(variable)
+
+    items: list[dict] = []
+    resp = table.scan(FilterExpression=filter_expr)
+    items.extend(resp.get("Items", []))
+    while "LastEvaluatedKey" in resp:
+        resp = table.scan(FilterExpression=filter_expr, ExclusiveStartKey=resp["LastEvaluatedKey"])
+        items.extend(resp.get("Items", []))
+
+    items.sort(key=lambda r: (r.get("variable", ""), r["date_start"]))
+    return [
+        {
+            "variable": i["variable"],
+            "dataset_id": i["dataset_id"],
+            "region": i["region"],
+            "date_start": i["date_start"],
+            "date_end": i["date_end"],
+            "downloaded_at": i["downloaded_at"],
+            "zarr_path": i["zarr_path"],
+        }
+        for i in items
+    ]
 
 
 def register_download(
@@ -73,37 +139,35 @@ def register_download(
     date_end: str,
     zarr_path: str,
 ):
-    """Record a completed download in the metadata DB."""
-    with sqlite3.connect(META_DB) as conn:
-        conn.execute(
-            """
-            INSERT INTO downloads
-                (variable, dataset_id, region, date_start, date_end, downloaded_at, zarr_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                variable,
-                dataset_id,
-                region,
-                date_start,
-                date_end,
-                datetime.utcnow().isoformat(),
-                zarr_path,
-            ),
-        )
-        conn.commit()
+    """Record a completed download in the metadata catalog."""
+    table = _dynamodb_table()
+    table.put_item(Item={
+        "pk": f"{variable}#{region}",
+        "sk": date_start,
+        "item_type": "download",
+        "variable": variable,
+        "dataset_id": dataset_id,
+        "region": region,
+        "date_start": date_start,
+        "date_end": date_end,
+        "downloaded_at": datetime.now(timezone.utc).isoformat(),
+        "zarr_path": zarr_path,
+    })
 
+
+# --- datos (Zarr sobre S3) ---
 
 def load_local(variable: str, region: str, date_start: str, date_end: str) -> xr.Dataset | None:
     """
-    Load data from local Zarr store if available for the requested range.
+    Load data from the S3 Zarr store if available for the requested range.
     Returns None if not found.
     """
-    zarr_path = DATA_DIR / variable / region
-    if not zarr_path.exists():
+    zarr_path = _s3_uri(variable, region)
+    fs = _s3fs_fs()
+    if not fs.exists(zarr_path):
         return None
     try:
-        ds = xr.open_zarr(zarr_path)
+        ds = xr.open_zarr(zarr_path, storage_options=STORAGE_OPTIONS)
         ds_slice = ds.sel(time=slice(date_start, date_end))
         if len(ds_slice.time) == 0:
             return None
@@ -113,39 +177,47 @@ def load_local(variable: str, region: str, date_start: str, date_end: str) -> xr
 
 
 def save_to_store(ds: xr.Dataset, variable: str, region: str):
-    """Append or create Zarr store for a variable+region."""
-    import numpy as np
-    zarr_path = DATA_DIR / variable / region
-    if zarr_path.exists():
+    """Append or create the Zarr store for a variable+region, en S3."""
+    zarr_path = _s3_uri(variable, region)
+    fs = _s3fs_fs()
+    if fs.exists(zarr_path):
         # Drop timestamps already in the store before appending to avoid duplicates.
         # (8-day composites at year boundaries can fall in two annual downloads.)
-        existing_times = xr.open_zarr(zarr_path).time.values
+        existing_times = xr.open_zarr(zarr_path, storage_options=STORAGE_OPTIONS).time.values
         ds = ds.sel(time=~np.isin(ds.time.values, existing_times))
         if len(ds.time) == 0:
             return
-        ds.to_zarr(zarr_path, append_dim="time")
+        ds.to_zarr(zarr_path, append_dim="time", storage_options=STORAGE_OPTIONS)
     else:
-        zarr_path.mkdir(parents=True, exist_ok=True)
-        ds.to_zarr(zarr_path, mode="w")
+        # Sin encoding explícito por ahora — igual que en master, se deja que
+        # Zarr elija el chunking solo. El chunking de 365 días medido antes se
+        # validó solo con datos diarios (SST); chlorophyll/pp son composites de
+        # 8 días, y "365" ahí significaría ~8 años por chunk, no ~1 — pendiente
+        # de recalcular por variable antes de fijarlo (ver plan, próxima etapa).
+        ds.to_zarr(zarr_path, mode="w", storage_options=STORAGE_OPTIONS)
 
 
-def get_cache_path(dataset_id: str, bbox: list, date_start: str, date_end: str) -> Path | None:
-    """Check if a valid on-demand cache entry exists."""
-    bbox_key = json.dumps(bbox)
-    now = datetime.utcnow().isoformat()
-    with sqlite3.connect(META_DB) as conn:
-        row = conn.execute(
-            """
-            SELECT zarr_path FROM cache
-            WHERE dataset_id = ? AND bbox = ? AND date_start = ? AND date_end = ?
-              AND expires_at > ?
-            """,
-            (dataset_id, bbox_key, date_start, date_end, now),
-        ).fetchone()
-    if row:
-        p = Path(row[0])
-        return p if p.exists() else None
-    return None
+# --- cache on-demand ---
+
+def get_cache_path(dataset_id: str, bbox: list, date_start: str, date_end: str) -> str | None:
+    """Check if a valid on-demand cache entry exists. Returns its S3 URI, or None."""
+    table = _dynamodb_table()
+    resp = table.get_item(Key={
+        "pk": f"cache#{dataset_id}#{_bbox_hash(bbox)}",
+        "sk": f"{date_start}#{date_end}",
+    })
+    item = resp.get("Item")
+    if not item:
+        return None
+
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
+    if int(item["expires_at"]) <= now_epoch:
+        return None
+
+    zarr_path = item["zarr_path"]
+    if not _s3fs_fs().exists(zarr_path):
+        return None
+    return zarr_path
 
 
 def register_cache(
@@ -156,18 +228,19 @@ def register_cache(
     zarr_path: str,
     ttl_days: int = 7,
 ):
-    """Register an on-demand cache entry."""
-    from datetime import timedelta
-    bbox_key = json.dumps(bbox)
-    now = datetime.utcnow()
-    expires = (now + timedelta(days=ttl_days)).isoformat()
-    with sqlite3.connect(META_DB) as conn:
-        conn.execute(
-            """
-            INSERT INTO cache
-                (dataset_id, bbox, date_start, date_end, cached_at, expires_at, zarr_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (dataset_id, bbox_key, date_start, date_end, now.isoformat(), expires, zarr_path),
-        )
-        conn.commit()
+    """Register an on-demand cache entry. `expires_at` es el atributo TTL de la tabla."""
+    table = _dynamodb_table()
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=ttl_days)
+    table.put_item(Item={
+        "pk": f"cache#{dataset_id}#{_bbox_hash(bbox)}",
+        "sk": f"{date_start}#{date_end}",
+        "item_type": "cache",
+        "dataset_id": dataset_id,
+        "bbox": json.dumps(bbox),
+        "date_start": date_start,
+        "date_end": date_end,
+        "cached_at": now.isoformat(),
+        "expires_at": int(expires.timestamp()),
+        "zarr_path": zarr_path,
+    })

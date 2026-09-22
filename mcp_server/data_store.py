@@ -40,7 +40,6 @@ criterio.
 
 import hashlib
 import json
-import os
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -49,10 +48,11 @@ import s3fs
 import xarray as xr
 from boto3.dynamodb.conditions import Attr
 
-AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
-S3_BUCKET = os.environ.get("ERDDAP_S3_BUCKET", "erddap-mcp-data")
-S3_PREFIX = os.environ.get("ERDDAP_S3_PREFIX", "erddap").strip("/")
-DYNAMODB_TABLE = os.environ.get("ERDDAP_DYNAMODB_TABLE", "erddap-catalog")
+from mcp_server.config import AWS_REGION, ERDDAP_DYNAMODB_TABLE, ERDDAP_S3_BUCKET, ERDDAP_S3_PREFIX
+
+S3_BUCKET = ERDDAP_S3_BUCKET
+S3_PREFIX = ERDDAP_S3_PREFIX.strip("/")
+DYNAMODB_TABLE = ERDDAP_DYNAMODB_TABLE
 
 # xarray/zarr usan storage_options (formato fsspec) para autenticar contra S3.
 # En Fargate esto viene del task role — no hace falta poner llaves aquí.

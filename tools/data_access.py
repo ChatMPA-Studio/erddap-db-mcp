@@ -15,7 +15,6 @@ from mcp_server.data_store import (
     cache_zarr_uri,
     get_cache_path,
     get_local_coverage,
-    init_db,
     load_local,
     register_cache,
     write_cache_zarr,
@@ -29,8 +28,6 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
 
 with open(CONFIG_PATH) as f:
     CONFIG = yaml.safe_load(f)
-
-init_db()
 
 
 def _resolve_bbox(bbox) -> list[float]:
@@ -236,7 +233,13 @@ def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str) -> str:
     """Return 3D array format for pixel-level data (original behavior)."""
     import numpy as np
 
-    data_var = sst_var if variable == "sst" else next(iter(ds.data_vars))
+    if variable == "sst":
+        data_var = sst_var
+    else:
+        # Mismo problema que en _ds_to_json_aggregated: erdMH1pp8day tiene dos
+        # data vars ("productivity" y "nobs") y ERDDAP no garantiza el orden.
+        preferred = {"primary_productivity": "productivity", "chlorophyll": "chlor_a"}.get(variable)
+        data_var = preferred if preferred in ds.data_vars else next(iter(ds.data_vars))
     arr = ds[data_var].squeeze().values
     n_points = arr.size
     shape = list(arr.shape)

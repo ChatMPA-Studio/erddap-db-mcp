@@ -6,14 +6,36 @@ viven: de disco local a un bucket S3, vía s3fs/fsspec (Zarr es el backend
 nativo del formato para object storage, no un workaround).
 
 La metadata (antes SQLite: tablas `downloads` y `cache`) pasa a una sola
-tabla de DynamoDB con dos formas de ítem, distinguidas por `item_type`:
-  - "download": catálogo permanente. PK "{variable}#{region}", SK date_start.
-  - "cache":    cache on-demand con TTL nativo. PK "cache#{dataset_id}#{bbox_hash}",
-                SK "{date_start}#{date_end}". `expires_at` es el atributo TTL
-                de la tabla (debe ser epoch en segundos, no ISO string).
+tabla de DynamoDB con tres formas de ítem, distinguidas por `item_type`:
+  - "download":  catálogo permanente. PK "{variable}#{region}", SK date_start.
+                 Muchas filas por variable+región (una por año/chunk ya
+                 descargado), todas apuntando al mismo store de Zarr.
+  - "cache":     cache on-demand con TTL nativo. PK "cache#{dataset_id}#{bbox_hash}",
+                 SK "{date_start}#{date_end}". `expires_at` es el atributo TTL
+                 de la tabla (debe ser epoch en segundos, no ISO string). Cada
+                 combinación de parámetros tiene su propio store de Zarr, así
+                 que la fila que registra el cache y el "candado" que evita
+                 escribirlo dos veces son la misma fila (ver register_cache).
+  - "sync_lock": candado transitorio para el catálogo permanente. PK
+                 "synclock#{variable}#{region}", SK fija "lock" — una sola
+                 fila posible por variable+región, sin importar cuántas filas
+                 de "download" (años distintos) haya. Hace falta aparte de
+                 "download" porque el catálogo permanente no tiene una fila
+                 cuya llave ignore la fecha: dos escrituras a años distintos
+                 (2024 vs 2025) tienen SK distinto, así que una condición
+                 sobre la fila de "download" nunca chocaría entre ellas —
+                 pero ambas escriben al mismo store de Zarr igual. A
+                 diferencia de "download"/"cache", esta fila no es un
+                 registro permanente: se crea justo antes de escribir el
+                 Zarr y se borra apenas termina (ver acquire_sync_lock /
+                 release_sync_lock).
 
 Mismo estilo que la versión de disco local que reemplaza: llamadas síncronas
-directas, sin locks ni executors — eso es trabajo de la Fase 2, no de esta.
+directas — sin executors todavía (Fase 2, en curso). El candado de sync sí
+se agrega ahora porque protege contra corrupción de datos (Zarr no tiene
+ninguna protección propia contra escritores concurrentes al mismo store),
+no es una optimización de rendimiento que se pueda posponer con ese mismo
+criterio.
 """
 
 import hashlib
@@ -153,6 +175,46 @@ def register_download(
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
         "zarr_path": zarr_path,
     })
+
+
+def acquire_sync_lock(variable: str, region: str, ttl_seconds: int = 3600) -> bool:
+    """Intenta tomar el candado de escritura del store de Zarr permanente de
+    esta variable+región. Devuelve True si lo tomó (el caller debe escribir y
+    después llamar a release_sync_lock), False si ya lo tiene otro escritor
+    — otra réplica, o (una vez que la Fase 2 use un executor) otro hilo del
+    mismo proceso.
+
+    Mismo mecanismo que register_cache: put_item condicional. `ttl_seconds`
+    es solo una red de seguridad — si quien lo tomó se cae sin soltarlo, otro
+    lo puede reclamar en cuanto pase ese tiempo, sin depender del borrado
+    perezoso del TTL nativo de DynamoDB (hasta ~48h de rezago real).
+    """
+    table = _dynamodb_table()
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=ttl_seconds)
+    try:
+        table.put_item(
+            Item={
+                "pk": f"synclock#{variable}#{region}",
+                "sk": "lock",
+                "item_type": "sync_lock",
+                "acquired_at": now.isoformat(),
+                "expires_at": int(expires.timestamp()),
+            },
+            ConditionExpression="attribute_not_exists(pk) OR expires_at < :now",
+            ExpressionAttributeValues={":now": int(now.timestamp())},
+        )
+        return True
+    except table.meta.client.exceptions.ConditionalCheckFailedException:
+        return False
+
+
+def release_sync_lock(variable: str, region: str):
+    """Suelta el candado tomado por acquire_sync_lock. Se llama siempre en un
+    finally, así que el candado no depende de esperar el TTL para liberarse
+    en el caso normal (sin caídas)."""
+    table = _dynamodb_table()
+    table.delete_item(Key={"pk": f"synclock#{variable}#{region}", "sk": "lock"})
 
 
 # --- datos (Zarr sobre S3) ---

@@ -251,20 +251,37 @@ async def _fetch_with_retry(
     year: int,
 ) -> dict:
     """Fetch one year of data with exponential backoff retries."""
-    from mcp_server.data_store import store_zarr_uri
+    from mcp_server.data_store import acquire_sync_lock, release_sync_lock, store_zarr_uri
     zarr_path = store_zarr_uri(variable, region)
 
+    ds = None
     for attempt in range(MAX_RETRIES):
         try:
-            if variable == "chlorophyll":
-                ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
-            elif variable == "primary_productivity":
-                ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
-            else:
-                ds = await fetch_sst(dataset_id, bbox, date_start, date_end)
+            if ds is None:
+                # Solo se pide a ERDDAP si todavía no lo tenemos — si un intento
+                # anterior falló DESPUÉS de traer el dato (p. ej. el candado de
+                # sync ocupado), no tiene sentido volver a bajarlo de la red.
+                if variable == "chlorophyll":
+                    ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
+                elif variable == "primary_productivity":
+                    ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
+                else:
+                    ds = await fetch_sst(dataset_id, bbox, date_start, date_end)
 
-            save_to_store(ds, variable, region)
-            register_download(variable, dataset_id, region, date_start, date_end, zarr_path)
+            # El store de Zarr es uno solo por variable+región, sin importar el
+            # año — dos escrituras concurrentes (otra réplica, u otro hilo del
+            # mismo proceso una vez que la Fase 2 use un executor) corromperían
+            # su metadata compartida. Se toma el candado recién acá, no antes
+            # del fetch, para no tenerlo ocupado durante todo el round-trip a
+            # ERDDAP.
+            if not acquire_sync_lock(variable, region):
+                raise RuntimeError(f"sync lock ocupado para {variable}/{region} — otro escritor activo")
+            try:
+                save_to_store(ds, variable, region)
+                register_download(variable, dataset_id, region, date_start, date_end, zarr_path)
+            finally:
+                release_sync_lock(variable, region)
+
             logger.info("OK %s | %s | %d", variable, region, year)
             return {"variable": variable, "region": region, "year": year, "status": "downloaded"}
 

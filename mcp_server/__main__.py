@@ -4,4 +4,4 @@ from mcp_server.server import mcp
 setup_logging()
 print_startup_summary()
 
-mcp.run(transport="http", host="0.0.0.0", port=PORT, path=MCP_BASE_PATH)
+mcp.run(transport="http", host="0.0.0.0", port=PORT, path=MCP_BASE_PATH, stateless_http=True)

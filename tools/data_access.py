@@ -200,8 +200,14 @@ def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_var
         if not vars_to_return:
             vars_to_return = [sst_var]
     else:
-        # chlorophyll / pp: use first data var, expose as the variable name (e.g. "chlorophyll")
-        raw_var = next(iter(ds.data_vars))
+        # chlorophyll / pp: expose as the variable name (e.g. "chlorophyll").
+        # erdMH1pp8day tiene dos data vars ("productivity" y "nobs" — conteo de
+        # observaciones, no la métrica); el orden de ds.data_vars no está
+        # garantizado por ERDDAP, así que no se puede confiar en next(iter(...))
+        # para elegir la correcta. Se prefiere el nombre conocido si está
+        # presente, y solo se cae al primero como último recurso.
+        preferred = {"primary_productivity": "productivity", "chlorophyll": "chlor_a"}.get(variable)
+        raw_var = preferred if preferred in ds.data_vars else next(iter(ds.data_vars))
         vars_to_return = [raw_var]
 
     result: dict = {"time": [str(t)[:10] for t in ds.time.values]}

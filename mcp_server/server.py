@@ -3,10 +3,15 @@
 Supports two transports:
 - stdio  (default, for Claude Desktop)
 - streamable-http (when PORT env var is set, for droplet deployment)
+
+El sync periódico ya no corre embebido en este proceso (ver run_initial_sync.py,
+usado ahora también como entrypoint de una tarea ECS programada aparte) — con N
+réplicas, un scheduler por proceso correría el mismo sync N veces en paralelo sin
+que ninguna sepa de las otras. `update_data` sigue siendo el único disparador de
+sync que queda dentro del servidor, invocado manualmente vía tool call.
 """
 
 import logging
-from contextlib import asynccontextmanager
 from typing import Optional, Union
 
 from fastmcp import FastMCP
@@ -19,21 +24,11 @@ from tools.data_access import (
     get_dataset_info as _get_dataset_info,
 )
 from mcp_server.prompts import discover_prompts
-from scheduler.sync_scheduler import start_scheduler
 
 logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(server: FastMCP):
-    scheduler = start_scheduler()
-    try:
-        yield
-    finally:
-        scheduler.shutdown(wait=False)
-
-
-mcp = FastMCP("erddap-db-mcp", lifespan=lifespan)
+mcp = FastMCP("erddap-db-mcp")
 
 
 @mcp.tool()

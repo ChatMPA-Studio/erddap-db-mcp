@@ -3,7 +3,8 @@ Sync logic: downloads default datasets for configured regions.
 Downloads year by year for resumability — if interrupted, the next run
 picks up from the last successfully downloaded year.
 Includes server availability check and exponential backoff retries.
-Called by the scheduler and by the update_data tool.
+Called by run_initial_sync.py (also used as the entrypoint of a scheduled ECS
+task, run every 14 days from outside this process) and by the update_data tool.
 """
 
 import asyncio

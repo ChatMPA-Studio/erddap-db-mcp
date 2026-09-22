@@ -18,6 +18,7 @@ from mcp_server.data_store import (
     init_db,
     load_local,
     register_cache,
+    write_cache_zarr,
 )
 from mcp_server.security import validate_get_data_args
 from tools.chlorophyll import fetch_chlorophyll
@@ -80,8 +81,11 @@ async def get_data(args: dict) -> str:
 
     if source != "auto":
         cache_path = cache_zarr_uri(dataset_id, bbox, date_start, date_end)
-        ds.to_zarr(cache_path, mode="w", storage_options=STORAGE_OPTIONS)
-        register_cache(dataset_id, bbox, date_start, date_end, cache_path)
+        # Primero reclama la llave en DynamoDB; solo si gana escribe a S3 — evita
+        # que dos réplicas con el mismo cache-miss escriban el mismo store de Zarr
+        # a la vez (ver docstring de register_cache).
+        if register_cache(dataset_id, bbox, date_start, date_end, cache_path):
+            write_cache_zarr(ds, cache_path)
 
     return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var,
                        sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)

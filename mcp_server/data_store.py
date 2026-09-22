@@ -227,20 +227,44 @@ def register_cache(
     date_end: str,
     zarr_path: str,
     ttl_days: int = 7,
-):
-    """Register an on-demand cache entry. `expires_at` es el atributo TTL de la tabla."""
+) -> bool:
+    """Register an on-demand cache entry, solo si nadie más ya registró uno vigente
+    para esta misma llave. `expires_at` es el atributo TTL de la tabla.
+
+    El put_item es condicional (attribute_not_exists(pk), o vencido) para que dos
+    réplicas que hacen cache-miss al mismo tiempo no puedan las dos "ganar" — eso
+    dejaría a las dos escribiendo el mismo store de Zarr en S3 a la vez, y Zarr no
+    tiene ninguna protección contra escritores concurrentes (metadata corrupta).
+    Devuelve True si esta llamada registró el ítem (el caller debe escribir el Zarr
+    real), False si ya había uno vigente (el caller NO debe escribir — otra réplica
+    ya se encargó o se está encargando).
+    """
     table = _dynamodb_table()
     now = datetime.now(timezone.utc)
     expires = now + timedelta(days=ttl_days)
-    table.put_item(Item={
-        "pk": f"cache#{dataset_id}#{_bbox_hash(bbox)}",
-        "sk": f"{date_start}#{date_end}",
-        "item_type": "cache",
-        "dataset_id": dataset_id,
-        "bbox": json.dumps(bbox),
-        "date_start": date_start,
-        "date_end": date_end,
-        "cached_at": now.isoformat(),
-        "expires_at": int(expires.timestamp()),
-        "zarr_path": zarr_path,
-    })
+    try:
+        table.put_item(
+            Item={
+                "pk": f"cache#{dataset_id}#{_bbox_hash(bbox)}",
+                "sk": f"{date_start}#{date_end}",
+                "item_type": "cache",
+                "dataset_id": dataset_id,
+                "bbox": json.dumps(bbox),
+                "date_start": date_start,
+                "date_end": date_end,
+                "cached_at": now.isoformat(),
+                "expires_at": int(expires.timestamp()),
+                "zarr_path": zarr_path,
+            },
+            ConditionExpression="attribute_not_exists(pk) OR expires_at < :now",
+            ExpressionAttributeValues={":now": int(now.timestamp())},
+        )
+        return True
+    except table.meta.client.exceptions.ConditionalCheckFailedException:
+        return False
+
+
+def write_cache_zarr(ds: xr.Dataset, zarr_path: str):
+    """Escribe un Dataset al store de cache on-demand, en S3. Solo debe llamarse
+    después de que register_cache devuelva True (ver docstring de register_cache)."""
+    ds.to_zarr(zarr_path, mode="w", storage_options=STORAGE_OPTIONS)

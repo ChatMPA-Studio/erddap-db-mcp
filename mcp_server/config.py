@@ -26,6 +26,12 @@ ERDDAP_S3_BUCKET: str    = _get("ERDDAP_S3_BUCKET", "erddap-mcp-data")
 ERDDAP_S3_PREFIX: str    = _get("ERDDAP_S3_PREFIX", "erddap")
 ERDDAP_DYNAMODB_TABLE: str = _get("ERDDAP_DYNAMODB_TABLE", "erddap-catalog")
 
+# ── Autenticación por API-key — tabla compartida entre los 3 MCP de ChatMPA --
+# (ltem/conapesca/erddap; la administra el panel admin del orchestrator, esta
+# app solo lee — ver mcp_server/auth.py)
+
+AUTH_DYNAMODB_TABLE: str = _get("AUTH_DYNAMODB_TABLE", "chatmpa-investigator-keys")
+
 # ── Logging -----------------------------------------------------------------
 
 
@@ -42,5 +48,6 @@ def print_startup_summary() -> None:
     logger.info("=" * 60)
     logger.info("  ERDDAP MCP Server")
     logger.info(f"  S3 bucket: s3://{ERDDAP_S3_BUCKET}/{ERDDAP_S3_PREFIX}  |  DynamoDB: {ERDDAP_DYNAMODB_TABLE}")
+    logger.info(f"  Auth table (compartida): {AUTH_DYNAMODB_TABLE}")
     logger.info(f"  Port     : {PORT}  |  Path: {MCP_BASE_PATH}")
     logger.info("=" * 60)

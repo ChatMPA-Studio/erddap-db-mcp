@@ -9,6 +9,12 @@ usado ahora también como entrypoint de una tarea ECS programada aparte) — con
 réplicas, un scheduler por proceso correría el mismo sync N veces en paralelo sin
 que ninguna sepa de las otras. `update_data` sigue siendo el único disparador de
 sync que queda dentro del servidor, invocado manualmente vía tool call.
+
+Auth por API-key (PDF de arquitectura, sección 04): cada request necesita
+Authorization: Bearer <llave>, validada contra la tabla compartida de los 3
+MCP (ver mcp_server/auth.py). Vía stdio (Claude Desktop, run_stdio.py) no hay
+transporte HTTP, así que no hay headers que validar — el auth solo aplica al
+transporte http/streamable-http.
 """
 
 import logging
@@ -23,12 +29,13 @@ from tools.data_access import (
     list_datasets as _list_datasets,
     get_dataset_info as _get_dataset_info,
 )
+from mcp_server.auth import ErddapApiKeyVerifier
 from mcp_server.prompts import discover_prompts
 
 logger = logging.getLogger(__name__)
 
 
-mcp = FastMCP("erddap-db-mcp")
+mcp = FastMCP("erddap-db-mcp", auth=ErddapApiKeyVerifier())
 
 
 @mcp.tool()

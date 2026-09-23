@@ -11,11 +11,10 @@ import asyncio
 import calendar
 import logging
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 import httpx
-import yaml
 
+from mcp_server.config import CONFIG
 from mcp_server.data_store import (
     get_local_coverage,
     register_download,
@@ -29,11 +28,6 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = [30, 120, 300]  # seconds between retries: 30s, 2min, 5min
-
-CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
-
-with open(CONFIG_PATH) as f:
-    CONFIG = yaml.safe_load(f)
 
 # Full historical start dates per variable
 HISTORY_START = {

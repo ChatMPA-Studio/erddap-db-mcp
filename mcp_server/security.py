@@ -25,6 +25,16 @@ def validate_sst_var(sst_var: str):
         raise ValueError(f"Invalid sst_var '{sst_var}'. Must be one of {VALID_SST_VARS}.")
 
 
+def validate_region(region: str):
+    if region not in VALID_REGIONS:
+        raise ValueError(f"Invalid region '{region}'. Must be one of {VALID_REGIONS}.")
+
+
+def validate_update_data_args(args: dict):
+    validate_variable(args.get("variable", ""))
+    validate_region(args.get("region", "all"))
+
+
 def validate_bbox(bbox: list):
     if len(bbox) != 4:
         raise ValueError("bbox must have exactly 4 values: [lon_min, lon_max, lat_min, lat_max].")

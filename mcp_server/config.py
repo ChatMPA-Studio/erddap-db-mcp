@@ -4,6 +4,9 @@ Configuration — reads environment variables at import time.
 
 import logging
 import os
+from pathlib import Path
+
+import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,6 +14,18 @@ load_dotenv()
 
 def _get(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
+
+
+# ── config.yml (datasets, regiones, servidor de ERDDAP) ----------------------
+# Un solo loader compartido — antes tools/data_access.py y tools/sync.py (y,
+# separado, tools/sst.py/chlorophyll.py/pp.py con la URL de ERDDAP hardcodeada
+# 3 veces en vez de leerla de acá) cada uno abría este mismo archivo por su
+# cuenta con el mismo boilerplate.
+
+CONFIG_YML_PATH = Path(__file__).parent.parent / "config.yml"
+
+with open(CONFIG_YML_PATH) as _f:
+    CONFIG: dict = yaml.safe_load(_f)
 
 
 # ── Server -------------------------------------------------------------------

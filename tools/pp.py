@@ -6,8 +6,7 @@ Queries NOAA CoastWatch ERDDAP using erddapy and returns xarray.Dataset.
 import xarray as xr
 from erddapy import ERDDAP
 
-
-ERDDAP_SERVER = "https://coastwatch.pfeg.noaa.gov/erddap"
+from mcp_server.config import CONFIG
 
 
 async def fetch_pp(
@@ -30,7 +29,7 @@ async def fetch_pp(
     """
     lon_min, lon_max, lat_min, lat_max = bbox
 
-    e = ERDDAP(server=ERDDAP_SERVER, protocol="griddap")
+    e = ERDDAP(server=CONFIG["erddap"]["server"], protocol="griddap")
     e.dataset_id = dataset_id
     e.requests_kwargs = {"timeout": 600}  # 10 min — PP is heavier than chlorophyll
     e.griddap_initialize()

@@ -6,10 +6,8 @@ Main tool dispatcher. Implements cache-first logic:
 """
 
 import json
-from pathlib import Path
 
-import yaml
-
+from mcp_server.config import CONFIG
 from mcp_server.data_store import (
     STORAGE_OPTIONS,
     cache_zarr_uri,
@@ -19,15 +17,10 @@ from mcp_server.data_store import (
     register_cache,
     write_cache_zarr,
 )
-from mcp_server.security import validate_get_data_args
+from mcp_server.security import validate_get_data_args, validate_update_data_args
 from tools.chlorophyll import fetch_chlorophyll
 from tools.pp import fetch_pp
 from tools.sst import fetch_sst
-
-CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
-
-with open(CONFIG_PATH) as f:
-    CONFIG = yaml.safe_load(f)
 
 
 def _resolve_bbox(bbox) -> list[float]:
@@ -95,6 +88,7 @@ async def list_coverage(args: dict) -> str:
 
 
 async def update_data(args: dict) -> str:
+    validate_update_data_args(args)
     from tools.sync import run_sync
     variable = args["variable"]
     region = args.get("region", "all")

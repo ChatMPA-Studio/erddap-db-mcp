@@ -72,7 +72,7 @@ async def get_data(
 
 
 @mcp.tool()
-async def list_coverage(variable: str = None) -> str:
+async def list_coverage(variable: Optional[str] = None) -> str:
     """Report what data is available in the local store.
 
     variable: optional filter — 'chlorophyll' or 'sst'
@@ -94,7 +94,7 @@ async def update_data(variable: str, region: str = "all") -> str:
 
 
 @mcp.tool()
-async def list_datasets(variable: str, query: str = None) -> str:
+async def list_datasets(variable: str, query: Optional[str] = None) -> str:
     """Search for available datasets on NOAA CoastWatch ERDDAP.
 
     variable: 'chlorophyll' or 'sst'

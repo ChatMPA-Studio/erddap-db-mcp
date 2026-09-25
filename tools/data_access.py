@@ -75,7 +75,7 @@ async def get_data(args: dict) -> str:
         # que dos réplicas con el mismo cache-miss escriban el mismo store de Zarr
         # a la vez (ver docstring de register_cache).
         if register_cache(dataset_id, bbox, date_start, date_end, cache_path):
-            write_cache_zarr(ds, cache_path)
+            write_cache_zarr(ds, cache_path, dataset_id, bbox, date_start, date_end)
 
     return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var,
                        sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)

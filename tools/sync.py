@@ -268,13 +268,14 @@ async def _fetch_with_retry(
             # su metadata compartida. Se toma el candado recién acá, no antes
             # del fetch, para no tenerlo ocupado durante todo el round-trip a
             # ERDDAP.
-            if not acquire_sync_lock(variable, region):
+            lease_id = acquire_sync_lock(variable, region)
+            if lease_id is None:
                 raise RuntimeError(f"sync lock ocupado para {variable}/{region} — otro escritor activo")
             try:
                 save_to_store(ds, variable, region)
                 register_download(variable, dataset_id, region, date_start, date_end, zarr_path)
             finally:
-                release_sync_lock(variable, region)
+                release_sync_lock(variable, region, lease_id)
 
             logger.info("OK %s | %s | %d", variable, region, year)
             return {"variable": variable, "region": region, "year": year, "status": "downloaded"}

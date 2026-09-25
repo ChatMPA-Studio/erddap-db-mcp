@@ -40,6 +40,7 @@ criterio.
 
 import hashlib
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -177,44 +178,66 @@ def register_download(
     })
 
 
-def acquire_sync_lock(variable: str, region: str, ttl_seconds: int = 3600) -> bool:
+def acquire_sync_lock(variable: str, region: str, ttl_seconds: int = 3600) -> str | None:
     """Intenta tomar el candado de escritura del store de Zarr permanente de
-    esta variable+región. Devuelve True si lo tomó (el caller debe escribir y
-    después llamar a release_sync_lock), False si ya lo tiene otro escritor
-    — otra réplica, o (una vez que la Fase 2 use un executor) otro hilo del
-    mismo proceso.
+    esta variable+región. Devuelve un lease_id único si lo tomó (el caller
+    debe escribir y después llamar a release_sync_lock con ese mismo
+    lease_id), None si ya lo tiene otro escritor — otra réplica, o (una vez
+    que la Fase 2 use un executor) otro hilo del mismo proceso.
 
     Mismo mecanismo que register_cache: put_item condicional. `ttl_seconds`
     es solo una red de seguridad — si quien lo tomó se cae sin soltarlo, otro
     lo puede reclamar en cuanto pase ese tiempo, sin depender del borrado
     perezoso del TTL nativo de DynamoDB (hasta ~48h de rezago real).
+
+    El lease_id es un fencing token: protege la fila de DynamoDB (no la
+    escritura a S3 en sí) contra un escritor que termina tarde — si su
+    candado ya expiró y otro lo reclamó mientras tanto, su release, al
+    exigir que el lease_id siga siendo el suyo, no le borra el candado
+    nuevo al que ya está escribiendo.
     """
     table = _dynamodb_table()
     now = datetime.now(timezone.utc)
     expires = now + timedelta(seconds=ttl_seconds)
+    lease_id = uuid.uuid4().hex
     try:
         table.put_item(
             Item={
                 "pk": f"synclock#{variable}#{region}",
                 "sk": "lock",
                 "item_type": "sync_lock",
+                "lease_id": lease_id,
                 "acquired_at": now.isoformat(),
                 "expires_at": int(expires.timestamp()),
             },
             ConditionExpression="attribute_not_exists(pk) OR expires_at < :now",
             ExpressionAttributeValues={":now": int(now.timestamp())},
         )
-        return True
+        return lease_id
     except table.meta.client.exceptions.ConditionalCheckFailedException:
-        return False
+        return None
 
 
-def release_sync_lock(variable: str, region: str):
-    """Suelta el candado tomado por acquire_sync_lock. Se llama siempre en un
+def release_sync_lock(variable: str, region: str, lease_id: str):
+    """Suelta el candado tomado por acquire_sync_lock, solo si el lease_id
+    todavía coincide con el que está en la fila. Se llama siempre en un
     finally, así que el candado no depende de esperar el TTL para liberarse
-    en el caso normal (sin caídas)."""
+    en el caso normal (sin caídas).
+
+    Si ya no coincide (alguien más lo reclamó porque este escritor tardó más
+    que ttl_seconds), no hace nada — borrarlo igual le quitaría el candado a
+    quien ya está escribiendo ahora, dejando la puerta abierta para un
+    tercero.
+    """
     table = _dynamodb_table()
-    table.delete_item(Key={"pk": f"synclock#{variable}#{region}", "sk": "lock"})
+    try:
+        table.delete_item(
+            Key={"pk": f"synclock#{variable}#{region}", "sk": "lock"},
+            ConditionExpression="lease_id = :mine",
+            ExpressionAttributeValues={":mine": lease_id},
+        )
+    except table.meta.client.exceptions.ConditionalCheckFailedException:
+        pass
 
 
 # --- datos (Zarr sobre S3) ---
@@ -326,7 +349,31 @@ def register_cache(
         return False
 
 
-def write_cache_zarr(ds: xr.Dataset, zarr_path: str):
+def write_cache_zarr(
+    ds: xr.Dataset,
+    zarr_path: str,
+    dataset_id: str,
+    bbox: list,
+    date_start: str,
+    date_end: str,
+):
     """Escribe un Dataset al store de cache on-demand, en S3. Solo debe llamarse
-    después de que register_cache devuelva True (ver docstring de register_cache)."""
-    ds.to_zarr(zarr_path, mode="w", storage_options=STORAGE_OPTIONS)
+    después de que register_cache devuelva True (ver docstring de register_cache).
+
+    Si la escritura falla, borra la fila que register_cache ya había creado —
+    sin esto, quedaría marcada como válida hasta por ttl_days apuntando a un
+    store roto o a medio escribir. Esto es seguro sin fencing token: register_cache
+    reclama la llave por ttl_days completos desde el principio (no hay una ventana
+    corta en la que otro escritor pueda haber entrado mientras este seguía
+    trabajando), así que en el momento en que esta función corre, nadie más pudo
+    haber reclamado la misma llave — no hay a quién pisarle el trabajo al borrar.
+    """
+    try:
+        ds.to_zarr(zarr_path, mode="w", storage_options=STORAGE_OPTIONS)
+    except Exception:
+        table = _dynamodb_table()
+        table.delete_item(Key={
+            "pk": f"cache#{dataset_id}#{_bbox_hash(bbox)}",
+            "sk": f"{date_start}#{date_end}",
+        })
+        raise

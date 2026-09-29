@@ -18,6 +18,7 @@ filtrara, lo que se filtra son hashes, no credenciales reutilizables.
 
 import hashlib
 import time
+from collections import OrderedDict
 
 import boto3
 from fastmcp.server.auth import AccessToken, TokenVerifier
@@ -26,6 +27,13 @@ from mcp_server.config import AUTH_DYNAMODB_TABLE, AWS_REGION
 
 # Mismo número que ya está en el PDF (sección 04) — no es una decisión nueva.
 CACHE_TTL_SECONDS = 60
+
+# Tope del cache en memoria. Con uso normal (investigadores reales, dados de
+# alta a mano por el panel admin) esto nunca se acerca a este número — el
+# límite es contra alguien mandando muchos tokens distintos e inválidos a
+# propósito, que si no, harían crecer el diccionario sin límite (cacheamos
+# también los resultados negativos, ver docstring de la clase).
+MAX_CACHE_ENTRIES = 10_000
 
 
 def _auth_table():
@@ -50,7 +58,7 @@ class ErddapApiKeyVerifier(TokenVerifier):
 
     def __init__(self):
         super().__init__(required_scopes=["erddap"])
-        self._cache: dict[str, tuple[AccessToken | None, float]] = {}
+        self._cache: OrderedDict[str, tuple[AccessToken | None, float]] = OrderedDict()
 
     async def verify_token(self, token: str) -> AccessToken | None:
         key_hash = _hash_key(token)
@@ -59,10 +67,14 @@ class ErddapApiKeyVerifier(TokenVerifier):
         if cached is not None:
             result, expires_at = cached
             if time.monotonic() < expires_at:
+                self._cache.move_to_end(key_hash)
                 return result
 
         result = self._lookup(token, key_hash)
         self._cache[key_hash] = (result, time.monotonic() + CACHE_TTL_SECONDS)
+        self._cache.move_to_end(key_hash)
+        if len(self._cache) > MAX_CACHE_ENTRIES:
+            self._cache.popitem(last=False)  # descarta la usada hace más tiempo
         return result
 
     def _lookup(self, token: str, key_hash: str) -> AccessToken | None:

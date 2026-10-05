@@ -69,16 +69,21 @@ async def get_data(args: dict) -> str:
     else:
         ds = await fetch_sst(dataset_id, bbox, date_start, date_end, sst_var=sst_var)
 
-    if source != "auto":
-        cache_path = cache_zarr_uri(dataset_id, bbox, date_start, date_end)
-        # Primero reclama la llave en DynamoDB; solo si gana escribe a S3 — evita
-        # que dos réplicas con el mismo cache-miss escriban el mismo store de Zarr
-        # a la vez (ver docstring de register_cache).
-        if register_cache(dataset_id, bbox, date_start, date_end, cache_path):
-            write_cache_zarr(ds, cache_path, dataset_id, bbox, date_start, date_end)
+    # erddapy abre el netCDF completo en memoria; sin close() el buffer queda
+    # retenido en el proceso del servidor después de cada request.
+    try:
+        if source != "auto":
+            cache_path = cache_zarr_uri(dataset_id, bbox, date_start, date_end)
+            # Primero reclama la llave en DynamoDB; solo si gana escribe a S3 — evita
+            # que dos réplicas con el mismo cache-miss escriban el mismo store de Zarr
+            # a la vez (ver docstring de register_cache).
+            if register_cache(dataset_id, bbox, date_start, date_end, cache_path):
+                write_cache_zarr(ds, cache_path, dataset_id, bbox, date_start, date_end)
 
-    return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var,
-                       sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
+        return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var,
+                           sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
+    finally:
+        ds.close()
 
 
 async def list_coverage(args: dict) -> str:

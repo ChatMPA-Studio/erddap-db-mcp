@@ -268,7 +268,8 @@ def save_to_store(ds: xr.Dataset, variable: str, region: str):
     if fs.exists(zarr_path):
         # Drop timestamps already in the store before appending to avoid duplicates.
         # (8-day composites at year boundaries can fall in two annual downloads.)
-        existing_times = xr.open_zarr(zarr_path, storage_options=STORAGE_OPTIONS).time.values
+        with xr.open_zarr(zarr_path, storage_options=STORAGE_OPTIONS) as existing:
+            existing_times = existing.time.values
         ds = ds.sel(time=~np.isin(ds.time.values, existing_times))
         if len(ds.time) == 0:
             return

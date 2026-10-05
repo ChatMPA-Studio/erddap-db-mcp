@@ -235,6 +235,14 @@ async def _server_available(server: str) -> bool:
         return False
 
 
+def _close(ds) -> None:
+    """Libera el Dataset que devuelve erddapy. erddapy abre el netCDF completo
+    en memoria; sin close() ese buffer (~370 MB por trimestre de PP) no se
+    libera nunca y el sync histórico muere por OOM después de N chunks."""
+    if ds is not None:
+        ds.close()
+
+
 async def _fetch_with_retry(
     variable: str,
     dataset_id: str,
@@ -278,6 +286,7 @@ async def _fetch_with_retry(
                 release_sync_lock(variable, region, lease_id)
 
             logger.info("OK %s | %s | %d", variable, region, year)
+            _close(ds)
             return {"variable": variable, "region": region, "year": year, "status": "downloaded"}
 
         except Exception as exc:
@@ -290,6 +299,7 @@ async def _fetch_with_retry(
                 await asyncio.sleep(wait)
             else:
                 logger.error("FAILED %s | %s | %d after %d attempts: %s", variable, region, year, MAX_RETRIES, exc)
+                _close(ds)
                 return {
                     "variable": variable,
                     "region": region,

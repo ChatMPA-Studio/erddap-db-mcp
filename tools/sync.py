@@ -10,7 +10,9 @@ task, run every 14 days from outside this process) and by the update_data tool.
 import asyncio
 import calendar
 import logging
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timedelta
+from multiprocessing import get_context
 
 import httpx
 
@@ -235,11 +237,45 @@ async def _server_available(server: str) -> bool:
         return False
 
 
-def _close(ds) -> None:
-    """Libera el Dataset que devuelve erddapy. erddapy abre el netCDF completo
-    en memoria; sin close() ese buffer (~370 MB por trimestre de PP) no se
-    libera nunca y el sync histórico muere por OOM después de N chunks."""
-    if ds is not None:
+def _sync_chunk(
+    variable: str,
+    dataset_id: str,
+    region: str,
+    bbox: list,
+    date_start: str,
+    date_end: str,
+) -> None:
+    """Baja un chunk de ERDDAP y lo agrega al store de Zarr. Corre en un
+    proceso hijo de un solo uso (ver _fetch_with_retry): cada to_zarr retiene
+    del orden del tamaño del chunk (~250 MB por trimestre de PP, medido en ECS
+    tanto contra S3 como contra disco local, con o sin close()), así que en un
+    solo proceso el sync histórico muere por OOM después de N chunks. Al
+    terminar el proceso, el sistema operativo recupera toda esa memoria."""
+    from mcp_server.data_store import acquire_sync_lock, release_sync_lock, store_zarr_uri
+    zarr_path = store_zarr_uri(variable, region)
+
+    if variable == "chlorophyll":
+        ds = asyncio.run(fetch_chlorophyll(dataset_id, bbox, date_start, date_end))
+    elif variable == "primary_productivity":
+        ds = asyncio.run(fetch_pp(dataset_id, bbox, date_start, date_end))
+    else:
+        ds = asyncio.run(fetch_sst(dataset_id, bbox, date_start, date_end))
+
+    try:
+        # El store de Zarr es uno solo por variable+región, sin importar el
+        # año — dos escrituras concurrentes (otra réplica, u otro proceso)
+        # corromperían su metadata compartida. Se toma el candado recién acá,
+        # no antes del fetch, para no tenerlo ocupado durante todo el
+        # round-trip a ERDDAP.
+        lease_id = acquire_sync_lock(variable, region)
+        if lease_id is None:
+            raise RuntimeError(f"sync lock ocupado para {variable}/{region} — otro escritor activo")
+        try:
+            save_to_store(ds, variable, region)
+            register_download(variable, dataset_id, region, date_start, date_end, zarr_path)
+        finally:
+            release_sync_lock(variable, region, lease_id)
+    finally:
         ds.close()
 
 
@@ -253,40 +289,17 @@ async def _fetch_with_retry(
     year: int,
 ) -> dict:
     """Fetch one year of data with exponential backoff retries."""
-    from mcp_server.data_store import acquire_sync_lock, release_sync_lock, store_zarr_uri
-    zarr_path = store_zarr_uri(variable, region)
-
-    ds = None
+    loop = asyncio.get_running_loop()
     for attempt in range(MAX_RETRIES):
         try:
-            if ds is None:
-                # Solo se pide a ERDDAP si todavía no lo tenemos — si un intento
-                # anterior falló DESPUÉS de traer el dato (p. ej. el candado de
-                # sync ocupado), no tiene sentido volver a bajarlo de la red.
-                if variable == "chlorophyll":
-                    ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
-                elif variable == "primary_productivity":
-                    ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
-                else:
-                    ds = await fetch_sst(dataset_id, bbox, date_start, date_end)
-
-            # El store de Zarr es uno solo por variable+región, sin importar el
-            # año — dos escrituras concurrentes (otra réplica, u otro hilo del
-            # mismo proceso una vez que la Fase 2 use un executor) corromperían
-            # su metadata compartida. Se toma el candado recién acá, no antes
-            # del fetch, para no tenerlo ocupado durante todo el round-trip a
-            # ERDDAP.
-            lease_id = acquire_sync_lock(variable, region)
-            if lease_id is None:
-                raise RuntimeError(f"sync lock ocupado para {variable}/{region} — otro escritor activo")
-            try:
-                save_to_store(ds, variable, region)
-                register_download(variable, dataset_id, region, date_start, date_end, zarr_path)
-            finally:
-                release_sync_lock(variable, region, lease_id)
+            # Un proceso nuevo por intento ("spawn": no hereda la memoria del
+            # padre); la excepción del hijo se re-lanza acá y cae en el retry.
+            with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as pool:
+                await loop.run_in_executor(
+                    pool, _sync_chunk, variable, dataset_id, region, bbox, date_start, date_end,
+                )
 
             logger.info("OK %s | %s | %d", variable, region, year)
-            _close(ds)
             return {"variable": variable, "region": region, "year": year, "status": "downloaded"}
 
         except Exception as exc:
@@ -299,7 +312,6 @@ async def _fetch_with_retry(
                 await asyncio.sleep(wait)
             else:
                 logger.error("FAILED %s | %s | %d after %d attempts: %s", variable, region, year, MAX_RETRIES, exc)
-                _close(ds)
                 return {
                     "variable": variable,
                     "region": region,

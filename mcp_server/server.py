@@ -30,12 +30,13 @@ from tools.data_access import (
     get_dataset_info as _get_dataset_info,
 )
 from mcp_server.auth import ErddapApiKeyVerifier
+from mcp_server.config import AUTH_ENABLED
 from mcp_server.prompts import discover_prompts
 
 logger = logging.getLogger(__name__)
 
 
-mcp = FastMCP("erddap-db-mcp", auth=ErddapApiKeyVerifier())
+mcp = FastMCP("erddap-db-mcp", auth=ErddapApiKeyVerifier() if AUTH_ENABLED else None)
 
 
 @mcp.tool()

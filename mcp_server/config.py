@@ -47,6 +47,12 @@ ERDDAP_DYNAMODB_TABLE: str = _get("ERDDAP_DYNAMODB_TABLE", "erddap-catalog")
 
 AUTH_DYNAMODB_TABLE: str = _get("AUTH_DYNAMODB_TABLE", "chatmpa-investigator-keys")
 
+# Interruptor para los primeros deploys de prueba en ECS: con "false" el
+# servidor no valida el Bearer contra la tabla de auth y el único control de
+# acceso es el header X-MCP-Api-Key del listener rule del ALB (mismo esquema
+# que ltem/conapesca). Default "true" -- apagarlo tiene que ser explícito.
+AUTH_ENABLED: bool = _get("ERDDAP_AUTH_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+
 # ── Logging -----------------------------------------------------------------
 
 
@@ -63,6 +69,9 @@ def print_startup_summary() -> None:
     logger.info("=" * 60)
     logger.info("  ERDDAP MCP Server")
     logger.info(f"  S3 bucket: s3://{ERDDAP_S3_BUCKET}/{ERDDAP_S3_PREFIX}  |  DynamoDB: {ERDDAP_DYNAMODB_TABLE}")
-    logger.info(f"  Auth table (compartida): {AUTH_DYNAMODB_TABLE}")
+    if AUTH_ENABLED:
+        logger.info(f"  Auth table (compartida): {AUTH_DYNAMODB_TABLE}")
+    else:
+        logger.warning("  Auth DESACTIVADO (ERDDAP_AUTH_ENABLED=false) -- solo protege el ALB")
     logger.info(f"  Port     : {PORT}  |  Path: {MCP_BASE_PATH}")
     logger.info("=" * 60)

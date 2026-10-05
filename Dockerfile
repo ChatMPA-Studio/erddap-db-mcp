@@ -5,10 +5,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install fastmcp server extras explicitly first, then all other deps
+# Deps resueltas con uv: el resolver de pip se rinde con backtracking
+# (ResolutionImpossible falso sobre fsspec/s3fs) con este set de dependencias.
 COPY pyproject.toml .
-RUN pip install --no-cache-dir "fastmcp-slim[server]>=2.0.0" && \
-    pip install --no-cache-dir .
+RUN pip install --no-cache-dir uv && \
+    uv pip install --system --no-cache .
 
 COPY mcp_server/ mcp_server/
 COPY tools/ tools/

@@ -21,6 +21,7 @@ from mcp_server.data_store import (
     save_to_store,
 )
 from tools.chlorophyll import fetch_chlorophyll
+from tools.erddap_client import fetch_dataset_info_rows
 from tools.pp import fetch_pp
 from tools.sst import fetch_sst
 
@@ -206,15 +207,9 @@ def _is_full_year_covered(record: dict, year_start: date, year_end: date) -> boo
 
 async def _get_dataset_max_date(server: str, dataset_id: str) -> date:
     """Query ERDDAP metadata to get the actual last available date for a dataset."""
-    url = f"{server}/info/{dataset_id}/index.json"
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(url, timeout=15)
-            r.raise_for_status()
-            rows = r.json().get("table", {}).get("rows", [])
-            cols = r.json().get("table", {}).get("columnNames", [])
-        for row in rows:
-            info = dict(zip(cols, row))
+        rows = await fetch_dataset_info_rows(server, dataset_id)
+        for info in rows:
             if info.get("Variable Name") == "time" and info.get("Attribute Name") == "actual_range":
                 # actual_range value is like "1.0674144E9, 1.7622432E9" (epoch seconds)
                 parts = info["Value"].split(",")

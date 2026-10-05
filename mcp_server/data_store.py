@@ -40,6 +40,7 @@ criterio.
 
 import hashlib
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -50,6 +51,8 @@ import xarray as xr
 from boto3.dynamodb.conditions import Attr
 
 from mcp_server.config import AWS_REGION, ERDDAP_DYNAMODB_TABLE, ERDDAP_S3_BUCKET, ERDDAP_S3_PREFIX
+
+logger = logging.getLogger(__name__)
 
 S3_BUCKET = ERDDAP_S3_BUCKET
 S3_PREFIX = ERDDAP_S3_PREFIX.strip("/")
@@ -257,7 +260,26 @@ def load_local(variable: str, region: str, date_start: str, date_end: str) -> xr
         if len(ds_slice.time) == 0:
             return None
         return ds_slice
-    except Exception:
+    except Exception as exc:
+        # El path existe (ya lo chequeamos arriba), pero abrirlo falló — puede
+        # ser throttling de S3, un permiso mal configurado, o metadata
+        # corrupta. Se trata igual como cache-miss (get_data sigue la cadena
+        # cache on-demand -> ERDDAP), pero logueado — sin esto, un problema
+        # real quedaría indistinguible de "no hay datos en ese rango".
+        logger.warning("load_local: no se pudo abrir %s: %s — se trata como cache-miss", zarr_path, exc)
+        return None
+
+
+def load_cached_zarr(zarr_path: str) -> xr.Dataset | None:
+    """Abre un store de cache on-demand cuya ruta ya pasó get_cache_path (fila
+    vigente en DynamoDB + fs.exists() ya confirmados). Mismo criterio que
+    load_local: "la ruta existe" no es lo mismo que "se puede leer sin
+    problemas" — si falla, se loguea y se trata como cache-miss en vez de
+    romper toda la llamada."""
+    try:
+        return xr.open_zarr(zarr_path, storage_options=STORAGE_OPTIONS)
+    except Exception as exc:
+        logger.warning("load_cached_zarr: no se pudo abrir %s: %s — se trata como cache-miss", zarr_path, exc)
         return None
 
 

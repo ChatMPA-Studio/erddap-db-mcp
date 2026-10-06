@@ -9,16 +9,17 @@ import json
 
 from mcp_server.config import CONFIG
 from mcp_server.data_store import (
-    STORAGE_OPTIONS,
     cache_zarr_uri,
     get_cache_path,
     get_local_coverage,
+    load_cached_zarr,
     load_local,
     register_cache,
     write_cache_zarr,
 )
 from mcp_server.security import validate_get_data_args, validate_update_data_args
 from tools.chlorophyll import fetch_chlorophyll
+from tools.erddap_client import fetch_dataset_info_rows, search_datasets
 from tools.pp import fetch_pp
 from tools.sst import fetch_sst
 
@@ -57,10 +58,12 @@ async def get_data(args: dict) -> str:
 
     cached = get_cache_path(dataset_id, bbox, date_start, date_end)
     if cached:
-        import xarray as xr
-        ds = xr.open_zarr(cached, storage_options=STORAGE_OPTIONS)
-        return _ds_to_json(ds, variable, source="cache", sst_var=sst_var,
-                           sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
+        ds = load_cached_zarr(cached)
+        if ds is not None:
+            return _ds_to_json(ds, variable, source="cache", sst_var=sst_var,
+                               sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
+        # load_cached_zarr ya logueó la falla — se sigue de largo al fetch de
+        # ERDDAP, igual que si no hubiera habido cache (ver su docstring).
 
     if variable == "chlorophyll":
         ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
@@ -102,34 +105,18 @@ async def update_data(args: dict) -> str:
 
 
 async def list_datasets(args: dict) -> str:
-    import httpx
     variable = args["variable"]
     query_extra = args.get("query", "")
     keyword = f"{variable} {query_extra}".strip()
     server = CONFIG["erddap"]["server"]
-    url = f"{server}/search/index.json?searchFor={keyword.replace(' ', '+')}&page=1&itemsPerPage=20"
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, timeout=15)
-        resp.raise_for_status()
-        raw = resp.json()
-    rows = raw.get("table", {}).get("rows", [])
-    cols = raw.get("table", {}).get("columnNames", [])
-    datasets = [dict(zip(cols, row)) for row in rows]
+    datasets = await search_datasets(server, keyword)
     return json.dumps({"data": datasets, "meta": {"count": len(datasets)}}, indent=2)
 
 
 async def get_dataset_info(args: dict) -> str:
-    import httpx
     dataset_id = args["dataset_id"]
     server = CONFIG["erddap"]["server"]
-    url = f"{server}/info/{dataset_id}/index.json"
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, timeout=15)
-        resp.raise_for_status()
-        raw = resp.json()
-    rows = raw.get("table", {}).get("rows", [])
-    cols = raw.get("table", {}).get("columnNames", [])
-    info = [dict(zip(cols, row)) for row in rows]
+    info = await fetch_dataset_info_rows(server, dataset_id)
     return json.dumps({"data": info, "meta": {"dataset_id": dataset_id}}, indent=2)
 
 
@@ -187,6 +174,21 @@ def _ds_to_json(
         return _ds_to_json_pixel(ds, variable, source, sst_var)
 
 
+# Nombre conocido de la data var "principal" por variable, para datasets que
+# traen más de una (p. ej. erdMH1pp8day expone "productivity" Y "nobs" —
+# conteo de observaciones, no la métrica). ERDDAP no garantiza el orden entre
+# ellas, así que next(iter(ds.data_vars)) no es confiable por sí solo.
+PREFERRED_DATA_VAR = {"primary_productivity": "productivity", "chlorophyll": "chlor_a"}
+
+
+def _resolve_data_var(ds, variable: str) -> str:
+    """Elige la data var a usar para variables no-SST (chlorophyll/pp): el
+    nombre conocido si está presente en el Dataset, y solo cae al primero
+    como último recurso."""
+    preferred = PREFERRED_DATA_VAR.get(variable)
+    return preferred if preferred in ds.data_vars else next(iter(ds.data_vars))
+
+
 def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_vars) -> str:
     """Collapse lat/lon → one value per timestep. No size limit applies."""
     import numpy as np
@@ -201,14 +203,7 @@ def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_var
             vars_to_return = [sst_var]
     else:
         # chlorophyll / pp: expose as the variable name (e.g. "chlorophyll").
-        # erdMH1pp8day tiene dos data vars ("productivity" y "nobs" — conteo de
-        # observaciones, no la métrica); el orden de ds.data_vars no está
-        # garantizado por ERDDAP, así que no se puede confiar en next(iter(...))
-        # para elegir la correcta. Se prefiere el nombre conocido si está
-        # presente, y solo se cae al primero como último recurso.
-        preferred = {"primary_productivity": "productivity", "chlorophyll": "chlor_a"}.get(variable)
-        raw_var = preferred if preferred in ds.data_vars else next(iter(ds.data_vars))
-        vars_to_return = [raw_var]
+        vars_to_return = [_resolve_data_var(ds, variable)]
 
     result: dict = {"time": [str(t)[:10] for t in ds.time.values]}
 
@@ -232,13 +227,7 @@ def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str) -> str:
     """Return 3D array format for pixel-level data (original behavior)."""
     import numpy as np
 
-    if variable == "sst":
-        data_var = sst_var
-    else:
-        # Mismo problema que en _ds_to_json_aggregated: erdMH1pp8day tiene dos
-        # data vars ("productivity" y "nobs") y ERDDAP no garantiza el orden.
-        preferred = {"primary_productivity": "productivity", "chlorophyll": "chlor_a"}.get(variable)
-        data_var = preferred if preferred in ds.data_vars else next(iter(ds.data_vars))
+    data_var = sst_var if variable == "sst" else _resolve_data_var(ds, variable)
     arr = ds[data_var].squeeze().values
     n_points = arr.size
     shape = list(arr.shape)

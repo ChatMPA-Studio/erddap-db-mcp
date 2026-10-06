@@ -10,7 +10,7 @@ task, run every 14 days from outside this process) and by the update_data tool.
 import asyncio
 import calendar
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
@@ -59,6 +59,13 @@ async def run_sync(variable: str = "all", region: str = "all") -> dict:
     for var in variables:
         dataset_id = CONFIG["datasets"][var]["default"]
         dataset_max = await _get_dataset_max_date(server, dataset_id)
+        if dataset_max is None:
+            # Sin saber hasta cuándo hay datos no se puede armar una consulta válida:
+            # ERDDAP responde 404 si el fin pedido pasa del último dato. Se reporta el
+            # error (sale con código != 0) en vez de adivinar con la fecha de hoy.
+            results.append({"variable": var, "dataset_id": dataset_id, "status": "error",
+                            "error": "could not determine the dataset's last available date"})
+            continue
         logger.info("Dataset %s max available date: %s", dataset_id, dataset_max)
         for reg in regions:
             bbox = CONFIG["regions"][reg]["bbox"]
@@ -205,19 +212,34 @@ def _is_full_year_covered(record: dict, year_start: date, year_end: date) -> boo
     return start <= year_start and end >= year_end
 
 
-async def _get_dataset_max_date(server: str, dataset_id: str) -> date:
-    """Query ERDDAP metadata to get the actual last available date for a dataset."""
-    try:
-        rows = await fetch_dataset_info_rows(server, dataset_id)
-        for info in rows:
-            if info.get("Variable Name") == "time" and info.get("Attribute Name") == "actual_range":
-                # actual_range value is like "1.0674144E9, 1.7622432E9" (epoch seconds)
-                parts = info["Value"].split(",")
-                max_epoch = float(parts[-1].strip())
-                return date.fromtimestamp(max_epoch)
-    except Exception as e:
-        logger.warning("Could not fetch dataset max date for %s: %s — using today.", dataset_id, e)
-    return date.today()
+METADATA_RETRY_BACKOFF = [5, 15]  # segundos entre reintentos de la consulta de metadata
+
+
+async def _get_dataset_max_date(server: str, dataset_id: str) -> date | None:
+    """Último día con datos según ERDDAP (actual_range del eje time), en UTC.
+
+    Devuelve None si no se pudo determinar tras reintentar. Antes caía a
+    date.today(): si la consulta de metadata fallaba una vez, el sync pedía un fin
+    posterior al último dato, ERDDAP respondía 404 y los 3 reintentos fallaban igual,
+    porque pedían el mismo rango.
+    """
+    for attempt in range(len(METADATA_RETRY_BACKOFF) + 1):
+        try:
+            rows = await fetch_dataset_info_rows(server, dataset_id)
+            for info in rows:
+                if info.get("Variable Name") == "time" and info.get("Attribute Name") == "actual_range":
+                    # actual_range value is like "1.0674144E9, 1.7622432E9" (epoch seconds)
+                    parts = info["Value"].split(",")
+                    max_epoch = float(parts[-1].strip())
+                    # UTC explícito: date.fromtimestamp usa la zona local de la máquina, y
+                    # en una zona al este de UTC daría un día de más (→ 404 de ERDDAP).
+                    return datetime.fromtimestamp(max_epoch, tz=timezone.utc).date()
+            logger.warning("No time actual_range in metadata of %s.", dataset_id)
+        except Exception as e:
+            logger.warning("Could not fetch dataset max date for %s (attempt %d): %s", dataset_id, attempt + 1, e)
+        if attempt < len(METADATA_RETRY_BACKOFF):
+            await asyncio.sleep(METADATA_RETRY_BACKOFF[attempt])
+    return None
 
 
 async def _server_available(server: str) -> bool:

@@ -31,7 +31,8 @@ async def _fetch_table_rows(url: str) -> list[dict]:
 async def fetch_dataset_info_rows(server: str, dataset_id: str) -> list[dict]:
     """Pide la metadata de un dataset a ERDDAP: una fila por variable/atributo
     documentado (get_dataset_info las deja subir tal cual si falla;
-    _get_dataset_max_date las atrapa y usa la fecha de hoy como fallback)."""
+    _get_dataset_max_date las atrapa, reintenta y, si sigue fallando, devuelve
+    None en vez de adivinar una fecha)."""
     return await _fetch_table_rows(f"{server}/info/{dataset_id}/index.json")
 
 

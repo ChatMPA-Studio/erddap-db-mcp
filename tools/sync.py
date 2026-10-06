@@ -3,24 +3,25 @@ Sync logic: downloads default datasets for configured regions.
 Downloads year by year for resumability — if interrupted, the next run
 picks up from the last successfully downloaded year.
 Includes server availability check and exponential backoff retries.
-Called by the scheduler and by the update_data tool.
+Called by run_initial_sync.py (also used as the entrypoint of a scheduled ECS
+task, run every 14 days from outside this process) and by the update_data tool.
 """
 
 import asyncio
 import calendar
 import logging
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
-import yaml
 
+from mcp_server.config import CONFIG
 from mcp_server.data_store import (
     get_local_coverage,
     register_download,
     save_to_store,
 )
 from tools.chlorophyll import fetch_chlorophyll
+from tools.erddap_client import fetch_dataset_info_rows
 from tools.pp import fetch_pp
 from tools.sst import fetch_sst
 
@@ -28,11 +29,6 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = [30, 120, 300]  # seconds between retries: 30s, 2min, 5min
-
-CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
-
-with open(CONFIG_PATH) as f:
-    CONFIG = yaml.safe_load(f)
 
 # Full historical start dates per variable
 HISTORY_START = {
@@ -63,6 +59,13 @@ async def run_sync(variable: str = "all", region: str = "all") -> dict:
     for var in variables:
         dataset_id = CONFIG["datasets"][var]["default"]
         dataset_max = await _get_dataset_max_date(server, dataset_id)
+        if dataset_max is None:
+            # Sin saber hasta cuándo hay datos no se puede armar una consulta válida:
+            # ERDDAP responde 404 si el fin pedido pasa del último dato. Se reporta el
+            # error (sale con código != 0) en vez de adivinar con la fecha de hoy.
+            results.append({"variable": var, "dataset_id": dataset_id, "status": "error",
+                            "error": "could not determine the dataset's last available date"})
+            continue
         logger.info("Dataset %s max available date: %s", dataset_id, dataset_max)
         for reg in regions:
             bbox = CONFIG["regions"][reg]["bbox"]
@@ -209,25 +212,34 @@ def _is_full_year_covered(record: dict, year_start: date, year_end: date) -> boo
     return start <= year_start and end >= year_end
 
 
-async def _get_dataset_max_date(server: str, dataset_id: str) -> date:
-    """Query ERDDAP metadata to get the actual last available date for a dataset."""
-    url = f"{server}/info/{dataset_id}/index.json"
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(url, timeout=15)
-            r.raise_for_status()
-            rows = r.json().get("table", {}).get("rows", [])
-            cols = r.json().get("table", {}).get("columnNames", [])
-        for row in rows:
-            info = dict(zip(cols, row))
-            if info.get("Variable Name") == "time" and info.get("Attribute Name") == "actual_range":
-                # actual_range value is like "1.0674144E9, 1.7622432E9" (epoch seconds)
-                parts = info["Value"].split(",")
-                max_epoch = float(parts[-1].strip())
-                return date.fromtimestamp(max_epoch)
-    except Exception as e:
-        logger.warning("Could not fetch dataset max date for %s: %s — using today.", dataset_id, e)
-    return date.today()
+METADATA_RETRY_BACKOFF = [5, 15]  # segundos entre reintentos de la consulta de metadata
+
+
+async def _get_dataset_max_date(server: str, dataset_id: str) -> date | None:
+    """Último día con datos según ERDDAP (actual_range del eje time), en UTC.
+
+    Devuelve None si no se pudo determinar tras reintentar. Antes caía a
+    date.today(): si la consulta de metadata fallaba una vez, el sync pedía un fin
+    posterior al último dato, ERDDAP respondía 404 y los 3 reintentos fallaban igual,
+    porque pedían el mismo rango.
+    """
+    for attempt in range(len(METADATA_RETRY_BACKOFF) + 1):
+        try:
+            rows = await fetch_dataset_info_rows(server, dataset_id)
+            for info in rows:
+                if info.get("Variable Name") == "time" and info.get("Attribute Name") == "actual_range":
+                    # actual_range value is like "1.0674144E9, 1.7622432E9" (epoch seconds)
+                    parts = info["Value"].split(",")
+                    max_epoch = float(parts[-1].strip())
+                    # UTC explícito: date.fromtimestamp usa la zona local de la máquina, y
+                    # en una zona al este de UTC daría un día de más (→ 404 de ERDDAP).
+                    return datetime.fromtimestamp(max_epoch, tz=timezone.utc).date()
+            logger.warning("No time actual_range in metadata of %s.", dataset_id)
+        except Exception as e:
+            logger.warning("Could not fetch dataset max date for %s (attempt %d): %s", dataset_id, attempt + 1, e)
+        if attempt < len(METADATA_RETRY_BACKOFF):
+            await asyncio.sleep(METADATA_RETRY_BACKOFF[attempt])
+    return None
 
 
 async def _server_available(server: str) -> bool:
@@ -250,20 +262,38 @@ async def _fetch_with_retry(
     year: int,
 ) -> dict:
     """Fetch one year of data with exponential backoff retries."""
-    from mcp_server.data_store import DATA_DIR
-    zarr_path = str(DATA_DIR / variable / region)
+    from mcp_server.data_store import acquire_sync_lock, release_sync_lock, store_zarr_uri
+    zarr_path = store_zarr_uri(variable, region)
 
+    ds = None
     for attempt in range(MAX_RETRIES):
         try:
-            if variable == "chlorophyll":
-                ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
-            elif variable == "primary_productivity":
-                ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
-            else:
-                ds = await fetch_sst(dataset_id, bbox, date_start, date_end)
+            if ds is None:
+                # Solo se pide a ERDDAP si todavía no lo tenemos — si un intento
+                # anterior falló DESPUÉS de traer el dato (p. ej. el candado de
+                # sync ocupado), no tiene sentido volver a bajarlo de la red.
+                if variable == "chlorophyll":
+                    ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
+                elif variable == "primary_productivity":
+                    ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
+                else:
+                    ds = await fetch_sst(dataset_id, bbox, date_start, date_end)
 
-            save_to_store(ds, variable, region)
-            register_download(variable, dataset_id, region, date_start, date_end, zarr_path)
+            # El store de Zarr es uno solo por variable+región, sin importar el
+            # año — dos escrituras concurrentes (otra réplica, u otro hilo del
+            # mismo proceso una vez que la Fase 2 use un executor) corromperían
+            # su metadata compartida. Se toma el candado recién acá, no antes
+            # del fetch, para no tenerlo ocupado durante todo el round-trip a
+            # ERDDAP.
+            lease_id = acquire_sync_lock(variable, region)
+            if lease_id is None:
+                raise RuntimeError(f"sync lock ocupado para {variable}/{region} — otro escritor activo")
+            try:
+                save_to_store(ds, variable, region)
+                register_download(variable, dataset_id, region, date_start, date_end, zarr_path)
+            finally:
+                release_sync_lock(variable, region, lease_id)
+
             logger.info("OK %s | %s | %d", variable, region, year)
             return {"variable": variable, "region": region, "year": year, "status": "downloaded"}
 

@@ -30,7 +30,7 @@
     }
   },
   "notes": [
-    "Sync interval: every 14 days (automatic via scheduler)",
+    "Sync interval: every 14 days (automatic, via a scheduled job outside this process)",
     "Default regions: pacific_mexico, gulf_mexico",
     "Historical coverage: chlorophyll from 2003, SST from 1981",
     "Downloads are chunked by year — safe to interrupt and resume"

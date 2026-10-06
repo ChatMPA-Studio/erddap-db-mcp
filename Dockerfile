@@ -12,7 +12,6 @@ RUN pip install --no-cache-dir "fastmcp-slim[server]>=2.0.0" && \
 
 COPY mcp_server/ mcp_server/
 COPY tools/ tools/
-COPY scheduler/ scheduler/
 COPY skills/ skills/
 COPY config.yml .
 COPY run_initial_sync.py .

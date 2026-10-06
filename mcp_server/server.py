@@ -3,10 +3,21 @@
 Supports two transports:
 - stdio  (default, for Claude Desktop)
 - streamable-http (when PORT env var is set, for droplet deployment)
+
+El sync periódico ya no corre embebido en este proceso (ver run_initial_sync.py,
+usado ahora también como entrypoint de una tarea ECS programada aparte) — con N
+réplicas, un scheduler por proceso correría el mismo sync N veces en paralelo sin
+que ninguna sepa de las otras. `update_data` sigue siendo el único disparador de
+sync que queda dentro del servidor, invocado manualmente vía tool call.
+
+Auth por API-key (PDF de arquitectura, sección 04): cada request necesita
+Authorization: Bearer <llave>, validada contra la tabla compartida de los 3
+MCP (ver mcp_server/auth.py). Vía stdio (Claude Desktop, run_stdio.py) no hay
+transporte HTTP, así que no hay headers que validar — el auth solo aplica al
+transporte http/streamable-http.
 """
 
 import logging
-from contextlib import asynccontextmanager
 from typing import Optional, Union
 
 from fastmcp import FastMCP
@@ -18,22 +29,13 @@ from tools.data_access import (
     list_datasets as _list_datasets,
     get_dataset_info as _get_dataset_info,
 )
+from mcp_server.auth import ErddapApiKeyVerifier
 from mcp_server.prompts import discover_prompts
-from scheduler.sync_scheduler import start_scheduler
 
 logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(server: FastMCP):
-    scheduler = start_scheduler()
-    try:
-        yield
-    finally:
-        scheduler.shutdown(wait=False)
-
-
-mcp = FastMCP("erddap-db-mcp", lifespan=lifespan)
+mcp = FastMCP("erddap-db-mcp", auth=ErddapApiKeyVerifier())
 
 
 @mcp.tool()
@@ -70,7 +72,7 @@ async def get_data(
 
 
 @mcp.tool()
-async def list_coverage(variable: str = None) -> str:
+async def list_coverage(variable: Optional[str] = None) -> str:
     """Report what data is available in the local store.
 
     variable: optional filter — 'chlorophyll' or 'sst'
@@ -92,7 +94,7 @@ async def update_data(variable: str, region: str = "all") -> str:
 
 
 @mcp.tool()
-async def list_datasets(variable: str, query: str = None) -> str:
+async def list_datasets(variable: str, query: Optional[str] = None) -> str:
     """Search for available datasets on NOAA CoastWatch ERDDAP.
 
     variable: 'chlorophyll' or 'sst'

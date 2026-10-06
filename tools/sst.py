@@ -10,6 +10,15 @@ from mcp_server.config import CONFIG
 
 SST_VARS = ("sst", "anom", "err", "ice")
 
+# Los datasets on-demand de MUR nombran distinto las variables que OISST. Se
+# renombran a los nombres lógicos (SST_VARS) justo después de descargar, para
+# que el resto del pipeline (serializador, cache) no tenga que saber de datasets.
+# Solo se listan los datasets que difieren; OISST ya usa los nombres lógicos.
+DATASET_VAR_RENAMES = {
+    "jplMURSST41": {"analysed_sst": "sst", "analysis_error": "err", "sea_ice_fraction": "ice"},
+    "jplMURSST41anom1day": {"sstAnom": "anom"},
+}
+
 
 async def fetch_sst(
     dataset_id: str,
@@ -51,4 +60,15 @@ async def fetch_sst(
     # Do not override e.variables — it breaks erddapy's internal query construction.
     # The caller selects the specific variable via sst_var when reading.
     ds = e.to_xarray()
+
+    renames = {k: v for k, v in DATASET_VAR_RENAMES.get(dataset_id, {}).items() if k in ds.data_vars}
+    if renames:
+        ds = ds.rename(renames)
+
+    if sst_var not in ds.data_vars:
+        available = [v for v in SST_VARS if v in ds.data_vars]
+        raise ValueError(
+            f"Dataset '{dataset_id}' has no '{sst_var}' variable. "
+            f"Available sst_var values for this dataset: {available}."
+        )
     return ds

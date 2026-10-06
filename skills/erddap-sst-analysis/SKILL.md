@@ -46,14 +46,20 @@ including anomaly detection, El Niño/La Niña signals, and long-term warming tr
    - Use `sst_var: "sst"` for raw temperature (default).
    - Use `sst_var: "anom"` to detect warm/cold events relative to climatology.
    - Use `sst_var: "err"` to assess data quality before interpreting values.
-4. Interpret the returned values:
+4. Check `meta.truncated` in the response. If it is `true`, the data returned is shorter
+   than requested (`meta.date_range_returned` vs `meta.date_range_requested`) — say so, and
+   do not present results as covering the full requested period.
+5. Interpret the returned values:
    - Raw SST typical range: Gulf peak 30–32°C; Pacific winter minimum (Baja) 14–18°C.
    - Anomaly > +0.5°C or < -0.5°C is ecologically significant for most species.
-5. For high spatial resolution (1km), use `source: "mur_1km"` with `sst_var: "sst"`.
+6. For high spatial resolution (1km), use `source: "mur_1km"` (`sst_var` of `sst`, `err` or `ice`).
+   For its anomaly product use `source: "mur_anomaly"` with `sst_var: "anom"` — that dataset has
+   no other variable, and any other `sst_var` returns an error listing what is available.
 
 ## Interpretation Guide
 
 - **OISST resolution:** 0.25° (~25 km) — suitable for regional/basin analysis.
+- **Early years are not daily:** in 1994–1995 the source has one value every 2 days.
 - **Anomalies:** Compare current values against 1981–2010 climatological baseline.
   Positive anomaly > 0.5°C is ecologically significant for most species.
 - **El Niño signal:** Look for sustained positive anomalies in the eastern Pacific

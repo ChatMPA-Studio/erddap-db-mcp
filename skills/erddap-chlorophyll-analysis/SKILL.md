@@ -34,11 +34,14 @@ including seasonal patterns, interannual variability, and bloom detection.
 1. Call `list_coverage` with `variable: "chlorophyll"` to confirm data availability.
 2. If coverage is insufficient, call `update_data` with `variable: "chlorophyll"`.
 3. Call `get_data` with `variable: "chlorophyll"`, target region, and date range.
-4. Interpret the returned values: typical range for Mexican seas is 0.05–5 mg/m³.
+4. Check `meta.truncated` in the response. If it is `true`, the data returned is shorter than
+   requested (`meta.date_range_returned` vs `meta.date_range_requested`) — say so. The default
+   dataset is the science-quality product and is published with a lag of several months.
+5. Interpret the returned values: typical range for Mexican seas is 0.05–5 mg/m³.
    - Coastal upwelling zones (Baja California): 1–10 mg/m³
    - Oligotrophic open ocean: < 0.1 mg/m³
    - Bloom events: > 5 mg/m³
-5. For higher spatial detail in the Pacific, use `source: "viirs_750m_npac"`.
+6. For higher spatial detail in the Pacific, use `source: "viirs_750m_npac"`.
 
 ## Interpretation Guide
 

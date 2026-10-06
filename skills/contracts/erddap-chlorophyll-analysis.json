@@ -50,7 +50,10 @@
       "meta": {
         "variable": "chlorophyll",
         "source": "'local' | 'cache' | 'erddap'",
-        "shape": "[n_times, n_lat, n_lon]"
+        "shape": "[n_times, n_lat, n_lon]",
+        "date_range_requested": "[start, end] as requested",
+        "date_range_returned": "[first, last] time step actually returned; null if empty",
+        "truncated": "true if the data returned falls short of the requested range by more than one time step"
       }
     }
   },

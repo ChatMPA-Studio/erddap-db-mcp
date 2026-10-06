@@ -40,7 +40,7 @@
       "type": "string",
       "enum": ["auto", "mur_1km", "mur_anomaly"],
       "default": "auto",
-      "description": "'auto' uses OISST 0.25° default. mur_1km for high spatial resolution."
+      "description": "'auto' uses OISST 0.25° default. mur_1km for high spatial resolution (sst_var sst|err|ice). mur_anomaly only supports sst_var=anom."
     }
   },
   "required": ["variable", "bbox", "date_range"],
@@ -56,7 +56,10 @@
       "meta": {
         "variable": "sst",
         "source": "'local' | 'cache' | 'erddap'",
-        "shape": "[n_times, n_lat, n_lon]"
+        "shape": "[n_times, n_lat, n_lon]",
+        "date_range_requested": "[start, end] as requested",
+        "date_range_returned": "[first, last] time step actually returned; null if empty",
+        "truncated": "true if the data returned falls short of the requested range by more than one time step"
       }
     }
   },

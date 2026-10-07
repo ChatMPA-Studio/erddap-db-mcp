@@ -66,7 +66,7 @@ including anomaly detection, El Niño/La Niña signals, and long-term warming tr
 - **MUR vs OISST:** MUR starts in 2002, is a foundation SST at ~1 km, and its anomaly uses a
   different climatology than OISST. Both are exposed as `sst` (°C) but they are not
   interchangeable: keep each analysis on a single `dataset_id`.
-- **Anomalies:** Compare current values against 1981–2010 climatological baseline.
+- **Anomalies:** Compare current values against the 1971–2000 climatological baseline.
   Positive anomaly > 0.5°C is ecologically significant for most species.
 - **El Niño signal:** Look for sustained positive anomalies in the eastern Pacific
   from October through April.

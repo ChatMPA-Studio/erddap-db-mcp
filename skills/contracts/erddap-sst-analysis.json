@@ -40,7 +40,7 @@
       "type": "string",
       "enum": ["auto", "mur_1km", "mur_anomaly"],
       "default": "auto",
-      "description": "'auto' uses OISST 0.25° default. mur_1km for high spatial resolution (sst_var sst|err|ice). mur_anomaly only supports sst_var=anom."
+      "description": "'auto' uses OISST 0.25° default (1981-present): use it for trends, climatology and marine heatwaves. mur_1km (sst_var sst|err|ice) and mur_anomaly (sst_var=anom only) are MUR, for spatial detail from 2002 onward; never mix MUR with OISST or use it for trends or marine heatwaves."
     }
   },
   "required": ["variable", "bbox", "date_range"],
@@ -56,6 +56,7 @@
       "meta": {
         "variable": "sst",
         "source": "'local' | 'cache' | 'erddap'",
+        "dataset_id": "ERDDAP dataset the values come from, e.g. 'ncdcOisst21Agg_LonPM180' (OISST, local default) or 'jplMURSST41' (MUR, mur_1km). Always present; do not mix series from different datasets.",
         "shape": "[n_times, n_lat, n_lon]",
         "date_range_requested": "[start, end] as requested",
         "date_range_returned": "[first, last] time step actually returned; null if empty",
@@ -67,6 +68,7 @@
     "Default dataset: ncdcOisst21Agg_LonPM180 (OISST v2.1, 0.25°, daily, 1981-present)",
     "Typical SST range Mexican seas: 14-32°C",
     "Anomaly baseline: 1971-2000 climatology",
-    "ice is always 0 in Mexican seas — only useful for high-latitude queries"
+    "ice is always 0 in Mexican seas — only useful for high-latitude queries",
+    "MUR (jplMURSST41, jplMURSST41anom1day): ~1 km, from 2002, foundation SST, anomaly against a different climatology than OISST — not interchangeable with OISST"
   ]
 }

@@ -226,19 +226,26 @@ def _ds_to_json(
         return _ds_to_json_pixel(ds, variable, source, sst_var, range_meta)
 
 
-# Nombre conocido de la data var "principal" por variable, para datasets que
-# traen más de una (p. ej. erdMH1pp8day expone "productivity" Y "nobs" —
-# conteo de observaciones, no la métrica). ERDDAP no garantiza el orden entre
-# ellas, así que next(iter(ds.data_vars)) no es confiable por sí solo.
-PREFERRED_DATA_VAR = {"primary_productivity": "productivity", "chlorophyll": "chlor_a"}
+# Nombres conocidos de la data var "principal" por variable, en orden de
+# preferencia, para datasets que traen más de una (p. ej. erdMH1pp8day expone
+# "productivity" Y "nobs" — conteo de observaciones, no la métrica). ERDDAP no
+# garantiza el orden entre ellas, así que next(iter(ds.data_vars)) no es
+# confiable por sí solo. Cada producto nombra distinto la misma magnitud: MODIS
+# usa "chlor_a" y VIIRS (erdVHNchla1day / erdVHNchla8day) usa "chla".
+PREFERRED_DATA_VAR = {
+    "primary_productivity": ("productivity",),
+    "chlorophyll": ("chlor_a", "chla"),
+}
 
 
 def _resolve_data_var(ds, variable: str) -> str:
     """Elige la data var a usar para variables no-SST (chlorophyll/pp): el
-    nombre conocido si está presente en el Dataset, y solo cae al primero
-    como último recurso."""
-    preferred = PREFERRED_DATA_VAR.get(variable)
-    return preferred if preferred in ds.data_vars else next(iter(ds.data_vars))
+    primer nombre conocido que esté presente en el Dataset, y solo cae al
+    primero disponible como último recurso."""
+    for name in PREFERRED_DATA_VAR.get(variable, ()):
+        if name in ds.data_vars:
+            return name
+    return next(iter(ds.data_vars))
 
 
 def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_vars, range_meta: dict) -> str:

@@ -50,6 +50,7 @@
       "meta": {
         "variable": "chlorophyll",
         "source": "'local' | 'cache' | 'erddap'",
+        "dataset_id": "ERDDAP dataset the values come from, e.g. 'erdMH1chla8day_R202SQ' (MODIS, local default) or 'erdVHNchla1day' (VIIRS, viirs_750m_npac). Always present; do not mix series from different datasets.",
         "shape": "[n_times, n_lat, n_lon]",
         "date_range_requested": "[start, end] as requested",
         "date_range_returned": "[first, last] time step actually returned; null if empty",

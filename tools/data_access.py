@@ -44,6 +44,10 @@ async def get_data(args: dict) -> str:
     aggregate_spatial = bool(args.get("aggregate_spatial", False))
 
     date_start, date_end = date_range[0], date_range[1]
+    # Con source="auto" es el dataset por defecto de la variable: el único que el
+    # sync guarda en el store permanente de S3, así que también identifica lo que
+    # devuelve la rama local.
+    dataset_id = _resolve_dataset_id(variable, source)
 
     if source == "auto":
         region_key, exact_match = _bbox_to_region_key(bbox)
@@ -53,9 +57,7 @@ async def get_data(args: dict) -> str:
                 ds = _clip_to_bbox(ds, bbox)
             return _ds_to_json(ds, variable, source="local", sst_var=sst_var,
                                sst_vars=sst_vars, aggregate_spatial=aggregate_spatial,
-                               date_range=date_range)
-
-    dataset_id = _resolve_dataset_id(variable, source)
+                               date_range=date_range, dataset_id=dataset_id)
 
     cached = get_cache_path(dataset_id, bbox, date_start, date_end)
     if cached:
@@ -63,7 +65,7 @@ async def get_data(args: dict) -> str:
         if ds is not None:
             return _ds_to_json(ds, variable, source="cache", sst_var=sst_var,
                                sst_vars=sst_vars, aggregate_spatial=aggregate_spatial,
-                               date_range=date_range)
+                               date_range=date_range, dataset_id=dataset_id)
         # load_cached_zarr ya logueó la falla — se sigue de largo al fetch de
         # ERDDAP, igual que si no hubiera habido cache (ver su docstring).
 
@@ -96,7 +98,7 @@ async def get_data(args: dict) -> str:
 
     return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var,
                        sst_vars=sst_vars, aggregate_spatial=aggregate_spatial,
-                       date_range=date_range)
+                       date_range=date_range, dataset_id=dataset_id)
 
 
 async def list_coverage(args: dict) -> str:
@@ -224,12 +226,17 @@ def _ds_to_json(
     sst_vars=None,
     aggregate_spatial: bool = False,
     date_range=None,
+    dataset_id=None,
 ) -> str:
-    range_meta = _range_meta(ds, variable, date_range) if date_range else {}
+    # dataset_id va siempre que se conozca: MUR y OISST se exponen ambos como
+    # variable="sst", y sin esto la respuesta no dice de qué producto viene.
+    extra_meta = {"dataset_id": dataset_id} if dataset_id else {}
+    if date_range:
+        extra_meta.update(_range_meta(ds, variable, date_range))
     if aggregate_spatial:
-        return _ds_to_json_aggregated(ds, variable, source, sst_var, sst_vars, range_meta)
+        return _ds_to_json_aggregated(ds, variable, source, sst_var, sst_vars, extra_meta)
     else:
-        return _ds_to_json_pixel(ds, variable, source, sst_var, range_meta)
+        return _ds_to_json_pixel(ds, variable, source, sst_var, extra_meta)
 
 
 # Nombres conocidos de la data var "principal" por variable, en orden de
@@ -254,7 +261,7 @@ def _resolve_data_var(ds, variable: str) -> str:
     return next(iter(ds.data_vars))
 
 
-def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_vars, range_meta: dict) -> str:
+def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_vars, extra_meta: dict) -> str:
     """Collapse lat/lon → one value per timestep. No size limit applies."""
     import numpy as np
 
@@ -284,12 +291,12 @@ def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_var
             "source": source,
             "aggregate_spatial": True,
             "n_timesteps": len(ds.time),
-            **range_meta,
+            **extra_meta,
         },
     })
 
 
-def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str, range_meta: dict) -> str:
+def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str, extra_meta: dict) -> str:
     """Return 3D array format for pixel-level data (original behavior)."""
     import numpy as np
 
@@ -306,7 +313,7 @@ def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str, range_meta: 
                 f"{MAX_POINTS:,}-point limit. Use aggregate_spatial=True to get a "
                 f"spatial-mean time series, or narrow bbox/date_range."
             ),
-            "meta": {"variable": variable, "source": source, "shape": shape, **range_meta},
+            "meta": {"variable": variable, "source": source, "shape": shape, **extra_meta},
         })
 
     return json.dumps({
@@ -320,6 +327,6 @@ def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str, range_meta: 
             "variable": variable,
             "source": source,
             "shape": shape,
-            **range_meta,
+            **extra_meta,
         },
     })

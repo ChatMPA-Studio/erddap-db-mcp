@@ -10,6 +10,15 @@ from mcp_server.config import CONFIG
 
 SST_VARS = ("sst", "anom", "err", "ice")
 
+# Los datasets on-demand de MUR nombran distinto las variables que OISST. Se
+# renombran a los nombres lógicos (SST_VARS) justo después de descargar, para
+# que el resto del pipeline (serializador, cache) no tenga que saber de datasets.
+# Solo se listan los datasets que difieren; OISST ya usa los nombres lógicos.
+DATASET_VAR_RENAMES = {
+    "jplMURSST41": {"analysed_sst": "sst", "analysis_error": "err", "sea_ice_fraction": "ice"},
+    "jplMURSST41anom1day": {"sstAnom": "anom"},
+}
+
 
 async def fetch_sst(
     dataset_id: str,
@@ -51,4 +60,23 @@ async def fetch_sst(
     # Do not override e.variables — it breaks erddapy's internal query construction.
     # The caller selects the specific variable via sst_var when reading.
     ds = e.to_xarray()
+
+    renames = {k: v for k, v in DATASET_VAR_RENAMES.get(dataset_id, {}).items() if k in ds.data_vars}
+    if renames:
+        ds = ds.rename(renames)
+
+    check_sst_var(ds, dataset_id, sst_var)
     return ds
+
+
+def check_sst_var(ds: xr.Dataset, dataset_id: str, sst_var: str) -> None:
+    """Error claro si el Dataset no trae la sst_var pedida (p. ej. mur_anomaly solo
+    tiene "anom"). Se usa al descargar y también al leer del cache/store, porque el
+    cache se guarda por dataset+bbox+fechas, no por sst_var: sin esto, un acierto
+    de cache con otra sst_var terminaría en un KeyError crudo de xarray."""
+    if sst_var not in ds.data_vars:
+        available = [v for v in SST_VARS if v in ds.data_vars]
+        raise ValueError(
+            f"Dataset '{dataset_id}' has no '{sst_var}' variable. "
+            f"Available sst_var values for this dataset: {available}."
+        )

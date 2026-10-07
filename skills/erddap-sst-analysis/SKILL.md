@@ -19,7 +19,7 @@ including anomaly detection, El Niño/La Niña signals, and long-term warming tr
 - Investigating thermal conditions for marine species habitat
 - Detecting warm/cold anomalies relative to climatology
 - Assessing El Niño/La Niña impacts on Mexican seas
-- Analyzing seasonal SST cycles or multi-decadal trends (data from 1981)
+- Analyzing seasonal SST cycles or multi-decadal trends (OISST, data from 1981)
 
 ## MCP Tools
 
@@ -46,15 +46,27 @@ including anomaly detection, El Niño/La Niña signals, and long-term warming tr
    - Use `sst_var: "sst"` for raw temperature (default).
    - Use `sst_var: "anom"` to detect warm/cold events relative to climatology.
    - Use `sst_var: "err"` to assess data quality before interpreting values.
-4. Interpret the returned values:
+4. Check `meta.truncated` in the response. If it is `true`, the data returned is shorter
+   than requested (`meta.date_range_returned` vs `meta.date_range_requested`) — say so, and
+   do not present results as covering the full requested period.
+5. Interpret the returned values:
    - Raw SST typical range: Gulf peak 30–32°C; Pacific winter minimum (Baja) 14–18°C.
    - Anomaly > +0.5°C or < -0.5°C is ecologically significant for most species.
-5. For high spatial resolution (1km), use `source: "mur_1km"` with `sst_var: "sst"`.
+6. Use MUR only for spatial detail, from 2002 onward:
+   - `source: "mur_1km"` (`sst_var` of `sst`, `err` or `ice`) for ~1 km resolution.
+   - `source: "mur_anomaly"` with `sst_var: "anom"` for its anomaly product — that dataset has no
+     other variable, and any other `sst_var` returns an error listing what is available.
+   - **Do not** mix MUR with OISST in the same series or comparison, and **do not** use MUR for
+     trends back to 1981 or for marine heatwave detection — use the default OISST for those.
+   - Check `meta.dataset_id` in each response to confirm which product the values come from.
 
 ## Interpretation Guide
 
 - **OISST resolution:** 0.25° (~25 km) — suitable for regional/basin analysis.
-- **Anomalies:** Compare current values against 1981–2010 climatological baseline.
+- **MUR vs OISST:** MUR starts in 2002, is a foundation SST at ~1 km, and its anomaly uses a
+  different climatology than OISST. Both are exposed as `sst` (°C) but they are not
+  interchangeable: keep each analysis on a single `dataset_id`.
+- **Anomalies:** Compare current values against the 1971–2000 climatological baseline.
   Positive anomaly > 0.5°C is ecologically significant for most species.
 - **El Niño signal:** Look for sustained positive anomalies in the eastern Pacific
   from October through April.
@@ -63,5 +75,6 @@ including anomaly detection, El Niño/La Niña signals, and long-term warming tr
 ## Success Criteria
 
 - Data returned covers the requested spatial and temporal extent
+- Each series or comparison uses a single `meta.dataset_id` (never OISST and MUR mixed)
 - Values are within physically plausible range (-2 to 35°C for open ocean)
 - Interpretation includes anomaly context and comparison to seasonal baseline

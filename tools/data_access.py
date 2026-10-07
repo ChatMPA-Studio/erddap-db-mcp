@@ -155,7 +155,7 @@ def _bbox_to_region_key(bbox: list) -> tuple[str, bool]:
 
 # Cadencia típica (días) por variable, solo para decidir la tolerancia cuando la
 # respuesta trae un único paso de tiempo y no se puede medir de los propios datos.
-DEFAULT_STEP_DAYS = {"sst": 2, "chlorophyll": 8, "primary_productivity": 8}
+DEFAULT_STEP_DAYS = {"sst": 1, "chlorophyll": 8, "primary_productivity": 8}
 
 
 def _range_meta(ds, variable: str, date_range) -> dict:
@@ -163,10 +163,15 @@ def _range_meta(ds, variable: str, date_range) -> dict:
     corta que lo pedido (`truncated`). Sin esto, un rango que se pasa del final
     de la cobertura vuelve con menos datos y sin ningún aviso.
 
-    Los productos no son diarios (clorofila: 8 días; OISST de 1995: cada 2), así
-    que "más corto" se mide con una tolerancia de un paso de los propios datos
-    devueltos — si no, toda consulta normal saldría marcada como truncada."""
+    No todos los productos son diarios (clorofila y PP: 8 días), así que "más
+    corto" se mide con una tolerancia de un paso de los propios datos devueltos
+    — si no, toda consulta normal de 8 días saldría marcada como truncada.
+
+    El paso es la mediana de los saltos entre fechas, no el mayor: un hueco
+    interno (p. ej. días faltantes en la fuente) inflaría la tolerancia y una
+    serie que termina antes de lo pedido dejaría de marcarse."""
     from datetime import date, timedelta
+    from statistics import median
 
     requested = [str(date_range[0])[:10], str(date_range[1])[:10]]
     times = sorted(str(t)[:10] for t in ds.time.values)
@@ -174,7 +179,8 @@ def _range_meta(ds, variable: str, date_range) -> dict:
         return {"date_range_requested": requested, "date_range_returned": None, "truncated": True}
 
     days = [date.fromisoformat(t) for t in times]
-    step = max(((b - a).days for a, b in zip(days, days[1:])), default=DEFAULT_STEP_DAYS.get(variable, 8))
+    gaps = [(b - a).days for a, b in zip(days, days[1:])]
+    step = median(gaps) if gaps else DEFAULT_STEP_DAYS.get(variable, 8)
     tol = timedelta(days=max(step, 1))
     start, end = date.fromisoformat(requested[0]), date.fromisoformat(requested[1])
     return {

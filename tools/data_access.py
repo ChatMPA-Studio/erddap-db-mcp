@@ -21,7 +21,7 @@ from mcp_server.security import validate_get_data_args, validate_update_data_arg
 from tools.chlorophyll import fetch_chlorophyll
 from tools.erddap_client import fetch_dataset_info_rows, search_datasets
 from tools.pp import fetch_pp
-from tools.sst import fetch_sst
+from tools.sst import check_sst_var, fetch_sst
 
 
 def _resolve_bbox(bbox) -> list[float]:
@@ -55,6 +55,8 @@ async def get_data(args: dict) -> str:
         if ds is not None:
             if not exact_match:
                 ds = _clip_to_bbox(ds, bbox)
+            if variable == "sst" and not sst_vars:
+                check_sst_var(ds, dataset_id, sst_var)
             return _ds_to_json(ds, variable, source="local", sst_var=sst_var,
                                sst_vars=sst_vars, aggregate_spatial=aggregate_spatial,
                                date_range=date_range, dataset_id=dataset_id)
@@ -63,6 +65,8 @@ async def get_data(args: dict) -> str:
     if cached:
         ds = load_cached_zarr(cached)
         if ds is not None:
+            if variable == "sst" and not sst_vars:
+                check_sst_var(ds, dataset_id, sst_var)
             return _ds_to_json(ds, variable, source="cache", sst_var=sst_var,
                                sst_vars=sst_vars, aggregate_spatial=aggregate_spatial,
                                date_range=date_range, dataset_id=dataset_id)

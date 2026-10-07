@@ -65,10 +65,18 @@ async def fetch_sst(
     if renames:
         ds = ds.rename(renames)
 
+    check_sst_var(ds, dataset_id, sst_var)
+    return ds
+
+
+def check_sst_var(ds: xr.Dataset, dataset_id: str, sst_var: str) -> None:
+    """Error claro si el Dataset no trae la sst_var pedida (p. ej. mur_anomaly solo
+    tiene "anom"). Se usa al descargar y también al leer del cache/store, porque el
+    cache se guarda por dataset+bbox+fechas, no por sst_var: sin esto, un acierto
+    de cache con otra sst_var terminaría en un KeyError crudo de xarray."""
     if sst_var not in ds.data_vars:
         available = [v for v in SST_VARS if v in ds.data_vars]
         raise ValueError(
             f"Dataset '{dataset_id}' has no '{sst_var}' variable. "
             f"Available sst_var values for this dataset: {available}."
         )
-    return ds

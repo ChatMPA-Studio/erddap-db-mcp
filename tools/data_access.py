@@ -21,7 +21,7 @@ from mcp_server.security import validate_get_data_args, validate_update_data_arg
 from tools.chlorophyll import fetch_chlorophyll
 from tools.erddap_client import fetch_dataset_info_rows, search_datasets
 from tools.pp import fetch_pp
-from tools.sst import fetch_sst
+from tools.sst import check_sst_var, fetch_sst
 
 
 def _resolve_bbox(bbox) -> list[float]:
@@ -44,6 +44,10 @@ async def get_data(args: dict) -> str:
     aggregate_spatial = bool(args.get("aggregate_spatial", False))
 
     date_start, date_end = date_range[0], date_range[1]
+    # Con source="auto" es el dataset por defecto de la variable: el único que el
+    # sync guarda en el store permanente de S3, así que también identifica lo que
+    # devuelve la rama local.
+    dataset_id = _resolve_dataset_id(variable, source)
 
     if source == "auto":
         region_key, exact_match = _bbox_to_region_key(bbox)
@@ -51,26 +55,42 @@ async def get_data(args: dict) -> str:
         if ds is not None:
             if not exact_match:
                 ds = _clip_to_bbox(ds, bbox)
+            if variable == "sst" and not sst_vars:
+                check_sst_var(ds, dataset_id, sst_var)
             return _ds_to_json(ds, variable, source="local", sst_var=sst_var,
-                               sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
-
-    dataset_id = _resolve_dataset_id(variable, source)
+                               sst_vars=sst_vars, aggregate_spatial=aggregate_spatial,
+                               date_range=date_range, dataset_id=dataset_id)
 
     cached = get_cache_path(dataset_id, bbox, date_start, date_end)
     if cached:
         ds = load_cached_zarr(cached)
         if ds is not None:
+            if variable == "sst" and not sst_vars:
+                check_sst_var(ds, dataset_id, sst_var)
             return _ds_to_json(ds, variable, source="cache", sst_var=sst_var,
-                               sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
+                               sst_vars=sst_vars, aggregate_spatial=aggregate_spatial,
+                               date_range=date_range, dataset_id=dataset_id)
         # load_cached_zarr ya logueó la falla — se sigue de largo al fetch de
         # ERDDAP, igual que si no hubiera habido cache (ver su docstring).
 
-    if variable == "chlorophyll":
-        ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
-    elif variable == "primary_productivity":
-        ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
-    else:
-        ds = await fetch_sst(dataset_id, bbox, date_start, date_end, sst_var=sst_var)
+    try:
+        if variable == "chlorophyll":
+            ds = await fetch_chlorophyll(dataset_id, bbox, date_start, date_end)
+        elif variable == "primary_productivity":
+            ds = await fetch_pp(dataset_id, bbox, date_start, date_end)
+        else:
+            ds = await fetch_sst(dataset_id, bbox, date_start, date_end, sst_var=sst_var)
+    except Exception as e:
+        # ERDDAP responde 404 "no matching results" cuando el rango (o el bbox) no tiene
+        # datos; el texto crudo nombra una variable interna que no tiene que ver con lo
+        # pedido y no dice qué sí hay.
+        if "no matching results" not in str(e) and "code=404" not in str(e):
+            raise
+        raise ValueError(
+            f"No data for {variable} between {date_start} and {date_end} in the requested "
+            f"area (dataset '{dataset_id}'; ERDDAP returned no matching results). "
+            f"Local coverage — {_coverage_summary(variable)}."
+        ) from e
 
     if source != "auto":
         cache_path = cache_zarr_uri(dataset_id, bbox, date_start, date_end)
@@ -81,7 +101,8 @@ async def get_data(args: dict) -> str:
             write_cache_zarr(ds, cache_path, dataset_id, bbox, date_start, date_end)
 
     return _ds_to_json(ds, variable, source="erddap", sst_var=sst_var,
-                       sst_vars=sst_vars, aggregate_spatial=aggregate_spatial)
+                       sst_vars=sst_vars, aggregate_spatial=aggregate_spatial,
+                       date_range=date_range, dataset_id=dataset_id)
 
 
 async def list_coverage(args: dict) -> str:
@@ -138,6 +159,54 @@ def _bbox_to_region_key(bbox: list) -> tuple[str, bool]:
     return f"custom_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}", False
 
 
+# Cadencia típica (días) por variable, solo para decidir la tolerancia cuando la
+# respuesta trae un único paso de tiempo y no se puede medir de los propios datos.
+DEFAULT_STEP_DAYS = {"sst": 1, "chlorophyll": 8, "primary_productivity": 8}
+
+
+def _range_meta(ds, variable: str, date_range) -> dict:
+    """Qué rango se pidió, cuál se devolvió realmente, y si la respuesta es más
+    corta que lo pedido (`truncated`). Sin esto, un rango que se pasa del final
+    de la cobertura vuelve con menos datos y sin ningún aviso.
+
+    No todos los productos son diarios (clorofila y PP: 8 días), así que "más
+    corto" se mide con una tolerancia de un paso de los propios datos devueltos
+    — si no, toda consulta normal de 8 días saldría marcada como truncada.
+
+    El paso es la mediana de los saltos entre fechas, no el mayor: un hueco
+    interno (p. ej. días faltantes en la fuente) inflaría la tolerancia y una
+    serie que termina antes de lo pedido dejaría de marcarse."""
+    from datetime import date, timedelta
+    from statistics import median
+
+    requested = [str(date_range[0])[:10], str(date_range[1])[:10]]
+    times = sorted(str(t)[:10] for t in ds.time.values)
+    if not times:
+        return {"date_range_requested": requested, "date_range_returned": None, "truncated": True}
+
+    days = [date.fromisoformat(t) for t in times]
+    gaps = [(b - a).days for a, b in zip(days, days[1:])]
+    step = median(gaps) if gaps else DEFAULT_STEP_DAYS.get(variable, 8)
+    tol = timedelta(days=max(step, 1))
+    start, end = date.fromisoformat(requested[0]), date.fromisoformat(requested[1])
+    return {
+        "date_range_requested": requested,
+        "date_range_returned": [times[0], times[-1]],
+        "truncated": bool(days[0] > start + tol or days[-1] < end - tol),
+    }
+
+
+def _coverage_summary(variable: str) -> str:
+    """Cobertura local por región, en una línea, para los mensajes de error."""
+    by_region: dict = {}
+    for r in get_local_coverage(variable):
+        a = by_region.setdefault(r["region"], [str(r["date_start"])[:10], str(r["date_end"])[:10]])
+        a[0], a[1] = min(a[0], str(r["date_start"])[:10]), max(a[1], str(r["date_end"])[:10])
+    if not by_region:
+        return "no local data for this variable"
+    return "; ".join(f"{reg}: {a[0]} to {a[1]}" for reg, a in sorted(by_region.items()))
+
+
 def _clip_to_bbox(ds, bbox: list):
     """Clip xarray Dataset to a lon/lat bounding box. Handles ascending/descending coords."""
     lon_min, lon_max, lat_min, lat_max = bbox
@@ -160,31 +229,43 @@ def _ds_to_json(
     sst_var: str = "sst",
     sst_vars=None,
     aggregate_spatial: bool = False,
+    date_range=None,
+    dataset_id=None,
 ) -> str:
-    import numpy as np
-
+    # dataset_id va siempre que se conozca: MUR y OISST se exponen ambos como
+    # variable="sst", y sin esto la respuesta no dice de qué producto viene.
+    extra_meta = {"dataset_id": dataset_id} if dataset_id else {}
+    if date_range:
+        extra_meta.update(_range_meta(ds, variable, date_range))
     if aggregate_spatial:
-        return _ds_to_json_aggregated(ds, variable, source, sst_var, sst_vars)
+        return _ds_to_json_aggregated(ds, variable, source, sst_var, sst_vars, extra_meta)
     else:
-        return _ds_to_json_pixel(ds, variable, source, sst_var)
+        return _ds_to_json_pixel(ds, variable, source, sst_var, extra_meta)
 
 
-# Nombre conocido de la data var "principal" por variable, para datasets que
-# traen más de una (p. ej. erdMH1pp8day expone "productivity" Y "nobs" —
-# conteo de observaciones, no la métrica). ERDDAP no garantiza el orden entre
-# ellas, así que next(iter(ds.data_vars)) no es confiable por sí solo.
-PREFERRED_DATA_VAR = {"primary_productivity": "productivity", "chlorophyll": "chlor_a"}
+# Nombres conocidos de la data var "principal" por variable, en orden de
+# preferencia, para datasets que traen más de una (p. ej. erdMH1pp8day expone
+# "productivity" Y "nobs" — conteo de observaciones, no la métrica). ERDDAP no
+# garantiza el orden entre ellas, así que next(iter(ds.data_vars)) no es
+# confiable por sí solo. Cada producto nombra distinto la misma magnitud: MODIS
+# usa "chlor_a" y VIIRS (erdVHNchla1day / erdVHNchla8day) usa "chla".
+PREFERRED_DATA_VAR = {
+    "primary_productivity": ("productivity",),
+    "chlorophyll": ("chlor_a", "chla"),
+}
 
 
 def _resolve_data_var(ds, variable: str) -> str:
     """Elige la data var a usar para variables no-SST (chlorophyll/pp): el
-    nombre conocido si está presente en el Dataset, y solo cae al primero
-    como último recurso."""
-    preferred = PREFERRED_DATA_VAR.get(variable)
-    return preferred if preferred in ds.data_vars else next(iter(ds.data_vars))
+    primer nombre conocido que esté presente en el Dataset, y solo cae al
+    primero disponible como último recurso."""
+    for name in PREFERRED_DATA_VAR.get(variable, ()):
+        if name in ds.data_vars:
+            return name
+    return next(iter(ds.data_vars))
 
 
-def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_vars) -> str:
+def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_vars, extra_meta: dict) -> str:
     """Collapse lat/lon → one value per timestep. No size limit applies."""
     import numpy as np
 
@@ -214,11 +295,12 @@ def _ds_to_json_aggregated(ds, variable: str, source: str, sst_var: str, sst_var
             "source": source,
             "aggregate_spatial": True,
             "n_timesteps": len(ds.time),
+            **extra_meta,
         },
     })
 
 
-def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str) -> str:
+def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str, extra_meta: dict) -> str:
     """Return 3D array format for pixel-level data (original behavior)."""
     import numpy as np
 
@@ -235,7 +317,7 @@ def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str) -> str:
                 f"{MAX_POINTS:,}-point limit. Use aggregate_spatial=True to get a "
                 f"spatial-mean time series, or narrow bbox/date_range."
             ),
-            "meta": {"variable": variable, "source": source, "shape": shape},
+            "meta": {"variable": variable, "source": source, "shape": shape, **extra_meta},
         })
 
     return json.dumps({
@@ -249,5 +331,6 @@ def _ds_to_json_pixel(ds, variable: str, source: str, sst_var: str) -> str:
             "variable": variable,
             "source": source,
             "shape": shape,
+            **extra_meta,
         },
     })

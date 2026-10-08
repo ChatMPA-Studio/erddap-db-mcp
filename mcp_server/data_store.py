@@ -245,23 +245,87 @@ def release_sync_lock(variable: str, region: str, lease_id: str):
 
 # --- datos (Zarr sobre S3) ---
 
+# Stores permanentes ya abiertos, por ruta: {zarr_path: (huella de _store_version, dataset)}.
+# Abrir un store lee el eje time completo para decodificarlo — con el chunking
+# actual (~135 chunks de 122 días en SST) son ~135 GETs y ~9 s por llamada. El
+# dataset abierto es perezoso: guarda metadata y el eje time, no los datos.
+_OPEN_STORES: dict[str, tuple[tuple, xr.Dataset]] = {}
+# Chunk del eje time en stores nuevos: cabe toda la historia (~16 500 días de
+# SST, ~130 KB) en uno solo; cada append reescribe ese chunk, que es barato.
+TIME_CHUNK = 100_000
+_READ_FS: s3fs.S3FileSystem | None = None
+
+
+def _read_fs() -> s3fs.S3FileSystem:
+    """Un solo cliente S3 para las lecturas del servidor, así las conexiones
+    keep-alive se reutilizan entre llamadas (_s3fs_fs crea uno nuevo cada vez).
+    Se crea con _s3fs_fs para que los tests que la reemplazan también cubran esto."""
+    global _READ_FS
+    if _READ_FS is None:
+        _READ_FS = _s3fs_fs()
+    return _READ_FS
+
+
+def _etag(fs: s3fs.S3FileSystem, zarr_path: str, keys: tuple[str, ...]) -> str | None:
+    """ETag de la primera llave que exista (v3 o v2); None si ninguna existe. Los
+    filesystems sin ETag (memory:// de los tests, disco) usan tamaño + fecha."""
+    for key in keys:
+        try:
+            info = fs.info(f"{zarr_path}/{key}", refresh=True)
+        except FileNotFoundError:
+            continue
+        return info.get("ETag") or repr((info.get("size"), info.get("created"), info.get("mtime")))
+    return None
+
+
+def _store_version(fs: s3fs.S3FileSystem, zarr_path: str) -> tuple | None:
+    """Huella del store para saber si alguien lo escribió. None si no existe.
+
+    Hacen falta las dos llaves: un append escribe time/zarr.json al principio y la
+    metadata consolidada de la raíz al final, y open_zarr lee la consolidada. Con
+    solo la de time, una réplica que abriera a mitad de un sync guardaría la vista
+    vieja con el ETag nuevo y no vería el append hasta el siguiente sync. Con solo
+    la raíz, un store sin metadata consolidada nunca cambiaría de huella."""
+    time_etag = _etag(fs, zarr_path, ("time/zarr.json", "time/.zarray"))
+    if time_etag is None:
+        return None
+    return time_etag, _etag(fs, zarr_path, ("zarr.json", ".zmetadata"))
+
+
+def _open_store(zarr_path: str) -> xr.Dataset | None:
+    """Dataset del store permanente, reutilizado mientras nadie lo haya escrito.
+    Dos HEAD (los ETag) por llamada en vez de reabrirlo: el sync puede correr en
+    otro proceso (tarea programada de ECS), así que no basta con invalidar en
+    save_to_store."""
+    fs = _read_fs()
+    version = _store_version(fs, zarr_path)
+    if version is None:
+        _OPEN_STORES.pop(zarr_path, None)
+        return None
+    hit = _OPEN_STORES.get(zarr_path)
+    if hit and hit[0] == version:
+        return hit[1]
+    ds = xr.open_zarr(fs.get_mapper(zarr_path))
+    _OPEN_STORES[zarr_path] = (version, ds)
+    return ds
+
+
 def load_local(variable: str, region: str, date_start: str, date_end: str) -> xr.Dataset | None:
     """
     Load data from the S3 Zarr store if available for the requested range.
     Returns None if not found.
     """
     zarr_path = _s3_uri(variable, region)
-    fs = _s3fs_fs()
-    if not fs.exists(zarr_path):
-        return None
     try:
-        ds = xr.open_zarr(zarr_path, storage_options=STORAGE_OPTIONS)
+        ds = _open_store(zarr_path)
+        if ds is None:
+            return None
         ds_slice = ds.sel(time=slice(date_start, date_end))
         if len(ds_slice.time) == 0:
             return None
         return ds_slice
     except Exception as exc:
-        # El path existe (ya lo chequeamos arriba), pero abrirlo falló — puede
+        # El path existe (_open_store lo chequeó con el ETag), pero abrirlo falló — puede
         # ser throttling de S3, un permiso mal configurado, o metadata
         # corrupta. Se trata igual como cache-miss (get_data sigue la cadena
         # cache on-demand -> ERDDAP), pero logueado — sin esto, un problema
@@ -296,12 +360,18 @@ def save_to_store(ds: xr.Dataset, variable: str, region: str):
             return
         ds.to_zarr(zarr_path, append_dim="time", storage_options=STORAGE_OPTIONS)
     else:
-        # Sin encoding explícito por ahora — igual que en master, se deja que
-        # Zarr elija el chunking solo. El chunking de 365 días medido antes se
-        # validó solo con datos diarios (SST); chlorophyll/pp son composites de
-        # 8 días, y "365" ahí significaría ~8 años por chunk, no ~1 — pendiente
-        # de recalcular por variable antes de fijarlo (ver plan, próxima etapa).
-        ds.to_zarr(zarr_path, mode="w", storage_options=STORAGE_OPTIONS)
+        # Sin encoding explícito para las variables de datos — igual que en
+        # master, se deja que Zarr elija el chunking solo. El chunking de 365
+        # días medido antes se validó solo con datos diarios (SST);
+        # chlorophyll/pp son composites de 8 días, y "365" ahí significaría ~8
+        # años por chunk, no ~1 — pendiente de recalcular por variable antes de
+        # fijarlo (ver plan, próxima etapa).
+        # El eje time sí va en un solo chunk: abrir el store lo lee completo, y
+        # con un chunk por append son cientos de GETs (ver _OPEN_STORES).
+        ds.to_zarr(zarr_path, mode="w", encoding={"time": {"chunks": (TIME_CHUNK,)}},
+                   storage_options=STORAGE_OPTIONS)
+    # Este proceso ya sabe que el store cambió; el ETag lo detectaría igual.
+    _OPEN_STORES.pop(zarr_path, None)
 
 
 # --- cache on-demand ---

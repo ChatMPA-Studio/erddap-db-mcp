@@ -257,9 +257,13 @@ _READ_FS: s3fs.S3FileSystem | None = None
 
 
 def _read_fs() -> s3fs.S3FileSystem:
-    """Un solo cliente S3 para las lecturas del servidor, así las conexiones
+    """Un solo cliente S3 para los HEAD de _store_version, así sus conexiones
     keep-alive se reutilizan entre llamadas (_s3fs_fs crea uno nuevo cada vez).
-    Se crea con _s3fs_fs para que los tests que la reemplazan también cubran esto."""
+    Las lecturas de datos no pasan por este cliente: zarr 3 convierte el mapper
+    con _make_async, que crea otra instancia async a partir de este; esa vive
+    dentro del dataset de _OPEN_STORES y se reutiliza mientras siga en cache.
+    Se crea con _s3fs_fs para que reemplazar esa función (p. ej. en tests)
+    también cubra esto."""
     global _READ_FS
     if _READ_FS is None:
         _READ_FS = _s3fs_fs()
@@ -301,6 +305,14 @@ def _open_store(zarr_path: str) -> xr.Dataset | None:
     version = _store_version(fs, zarr_path)
     if version is None:
         _OPEN_STORES.pop(zarr_path, None)
+        # Sin metadata de time puede ser que el store no exista (cache-miss
+        # normal) o que exista a medias (creación interrumpida, borrado parcial).
+        # El segundo caso hay que verlo en los logs: antes de _OPEN_STORES lo
+        # hacía fallar open_zarr y caía en el warning de load_local. El exists
+        # extra solo se paga cuando falta time, no en el camino normal.
+        if fs.exists(zarr_path):
+            logger.warning("load_local: %s existe pero le falta la metadata de time "
+                           "— se trata como cache-miss", zarr_path)
         return None
     hit = _OPEN_STORES.get(zarr_path)
     if hit and hit[0] == version:
